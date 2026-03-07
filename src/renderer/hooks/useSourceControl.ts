@@ -31,6 +31,8 @@ export function useFileDiff(
   staged: boolean,
   options?: { enabled?: boolean }
 ) {
+  const shouldPoll = useShouldPoll();
+
   return useQuery({
     queryKey: ['git', 'file-diff', workdir, path, staged],
     queryFn: async () => {
@@ -38,6 +40,9 @@ export function useFileDiff(
       return window.electronAPI.git.getFileDiff(workdir, path, staged);
     },
     enabled: (options?.enabled ?? true) && !!workdir && !!path,
+    staleTime: 0, // Always consider data stale
+    refetchInterval: shouldPoll ? 2000 : false, // Poll every 2s when window is focused
+    refetchIntervalInBackground: false, // Don't poll in background
   });
 }
 
