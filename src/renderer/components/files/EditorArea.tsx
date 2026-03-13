@@ -134,7 +134,7 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   const focus = useTerminalWriteStore((state) => state.focus);
 
   // Helper function to format line reference from selection
-  const formatLineRef = useCallback((selection: monaco.ISelection): string => {
+  const formatLineRef = useCallback((selection: monaco.Selection): string => {
     const endLine =
       selection.endColumn === 1 ? selection.endLineNumber - 1 : selection.endLineNumber;
     return selection.startLineNumber === endLine
