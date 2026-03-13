@@ -164,6 +164,7 @@ function getWindowsRegistryPath(): string {
 interface PtySession {
   pty: pty.IPty;
   cwd: string;
+  ownerId: number | null;
   onData: (data: string) => void;
   onExit?: (exitCode: number, signal?: number) => void;
   // node-pty returns disposables for event subscriptions; keep them so we can
@@ -303,6 +304,7 @@ export function getEnhancedPath(): string {
 export class PtyManager {
   private sessions = new Map<string, PtySession>();
   private counter = 0;
+  private activityRequestCounter = 0;
   // 活动检测缓存：{ ptyId: { lastCheckTs, lastValue, inFlightPromise } }
   private activityCache = new Map<
     string,
@@ -310,6 +312,7 @@ export class PtyManager {
       lastCheckTs: number;
       lastValue: boolean;
       inFlightPromise: Promise<boolean> | null;
+      requestId: number;
     }
   >();
   private readonly ACTIVITY_CACHE_TTL_MS = 2000; // 缓存 2 秒
@@ -317,7 +320,8 @@ export class PtyManager {
   create(
     options: TerminalCreateOptions,
     onData: (data: string) => void,
-    onExit?: (exitCode: number, signal?: number) => void
+    onExit?: (exitCode: number, signal?: number) => void,
+    ownerId: number | null = null
   ): string {
     const id = `pty-${++this.counter}`;
     const home = process.env.HOME || process.env.USERPROFILE || homedir();
@@ -416,7 +420,7 @@ export class PtyManager {
     });
 
     // Store session first so onExit callback can access it
-    const session: PtySession = { pty: ptyProcess, cwd, onData, onExit, dataDisposable };
+    const session: PtySession = { pty: ptyProcess, cwd, ownerId, onData, onExit, dataDisposable };
     this.sessions.set(id, session);
 
     const exitDisposable = ptyProcess.onExit(({ exitCode, signal }) => {
@@ -540,6 +544,14 @@ export class PtyManager {
     }
   }
 
+  destroyByOwner(ownerId: number): void {
+    for (const [id, session] of this.sessions.entries()) {
+      if (session.ownerId === ownerId) {
+        this.destroy(id);
+      }
+    }
+  }
+
   /**
    * Destroy all PTY sessions and wait for them to fully exit.
    * This should be used during app shutdown to prevent crashes.
@@ -602,6 +614,7 @@ export class PtyManager {
     }
 
     // 执行新的活动检测
+    const requestId = ++this.activityRequestCounter;
     const checkPromise = (async () => {
       try {
         // Get entire process tree (shell + all child processes like Claude Code)
@@ -629,7 +642,7 @@ export class PtyManager {
       } finally {
         // 清除 in-flight 标记
         const cache = this.activityCache.get(id);
-        if (cache) {
+        if (cache?.requestId === requestId) {
           cache.inFlightPromise = null;
         }
       }
@@ -638,17 +651,24 @@ export class PtyManager {
     // 缓存 promise
     this.activityCache.set(id, {
       lastCheckTs: now,
-      lastValue: false, // 临时值，会被下面的 await 更新
+      lastValue: cached?.lastValue ?? false,
       inFlightPromise: checkPromise,
+      requestId,
     });
 
     const result = await checkPromise;
+
+    const latestCache = this.activityCache.get(id);
+    if (!this.sessions.has(id) || latestCache?.requestId !== requestId) {
+      return result;
+    }
 
     // 更新缓存值
     this.activityCache.set(id, {
       lastCheckTs: now,
       lastValue: result,
       inFlightPromise: null,
+      requestId,
     });
 
     return result;

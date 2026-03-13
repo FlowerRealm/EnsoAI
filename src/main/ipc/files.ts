@@ -2,12 +2,15 @@ import { rmSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { type FileEntry, type FileReadResult, IPC_CHANNELS } from '@shared/types';
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, ipcMain, shell, type WebContents } from 'electron';
 import iconv from 'iconv-lite';
 import { isBinaryFile } from 'isbinaryfile';
 import jschardet from 'jschardet';
 import { FileWatcher } from '../services/files/FileWatcher';
-import { registerAllowedLocalFileRoot } from '../services/files/LocalFileAccess';
+import {
+  registerAllowedLocalFileRoot,
+  unregisterAllowedLocalFileRootsByOwner,
+} from '../services/files/LocalFileAccess';
 import { createSimpleGit, normalizeGitRelativePath } from '../services/git/runtime';
 
 /**
@@ -60,22 +63,93 @@ function detectEncoding(buffer: Buffer): { encoding: string; confidence: number 
   return { encoding: 'utf-8', confidence: 0 };
 }
 
-const watchers = new Map<string, FileWatcher>();
-const watcherCleanups = new Map<string, () => void>();
+type FileWatcherEventType = 'create' | 'update' | 'delete';
+type FileWatcherState = 'starting' | 'running' | 'stopping';
+
+interface FileWatcherEntry {
+  watcher: FileWatcher;
+  dirPath: string;
+  normalizedDirPath: string;
+  ownerId: number;
+  state: FileWatcherState;
+  startPromise: Promise<void>;
+  cleanup: () => void;
+}
+
+const watchers = new Map<string, FileWatcherEntry>();
+const ownerWatcherKeys = new Map<number, Set<string>>();
+const fileResourceOwners = new Set<number>();
+
+function normalizeWatchedPath(inputPath: string): string {
+  return inputPath.replace(/\\/g, '/').toLowerCase();
+}
+
+function getWatcherKey(ownerId: number, dirPath: string): string {
+  return `${ownerId}:${normalizeWatchedPath(dirPath)}`;
+}
+
+function trackWatcherKey(ownerId: number, key: string): void {
+  const keys = ownerWatcherKeys.get(ownerId) ?? new Set<string>();
+  keys.add(key);
+  ownerWatcherKeys.set(ownerId, keys);
+}
+
+function untrackWatcherKey(ownerId: number, key: string): void {
+  const keys = ownerWatcherKeys.get(ownerId);
+  if (!keys) return;
+
+  keys.delete(key);
+  if (keys.size === 0) {
+    ownerWatcherKeys.delete(ownerId);
+  }
+}
+
+async function stopWatcherEntry(key: string): Promise<void> {
+  const entry = watchers.get(key);
+  if (!entry || entry.state === 'stopping') {
+    return;
+  }
+
+  entry.state = 'stopping';
+  entry.cleanup();
+  await entry.startPromise.catch(() => {});
+  await entry.watcher.stop().catch(() => {});
+
+  watchers.delete(key);
+  untrackWatcherKey(entry.ownerId, key);
+}
+
+async function stopFileWatchersForOwner(ownerId: number): Promise<void> {
+  const keys = Array.from(ownerWatcherKeys.get(ownerId) ?? []);
+  await Promise.all(keys.map((key) => stopWatcherEntry(key)));
+}
+
+function ensureFileOwnerCleanup(sender: WebContents): void {
+  const ownerId = sender.id;
+  if (fileResourceOwners.has(ownerId)) {
+    return;
+  }
+
+  fileResourceOwners.add(ownerId);
+  sender.once('destroyed', () => {
+    fileResourceOwners.delete(ownerId);
+    unregisterAllowedLocalFileRootsByOwner(ownerId);
+    void stopFileWatchersForOwner(ownerId);
+  });
+}
 
 /**
  * Stop all file watchers for paths under the given directory
  */
 export async function stopWatchersInDirectory(dirPath: string): Promise<void> {
-  const normalizedDir = dirPath.replace(/\\/g, '/').toLowerCase();
+  const normalizedDir = normalizeWatchedPath(dirPath);
 
-  for (const [path, watcher] of watchers.entries()) {
-    const normalizedPath = path.replace(/\\/g, '/').toLowerCase();
-    if (normalizedPath === normalizedDir || normalizedPath.startsWith(`${normalizedDir}/`)) {
-      watcherCleanups.get(path)?.();
-      await watcher.stop();
-      watchers.delete(path);
-      watcherCleanups.delete(path);
+  for (const [key, entry] of Array.from(watchers.entries())) {
+    if (
+      entry.normalizedDirPath === normalizedDir ||
+      entry.normalizedDirPath.startsWith(`${normalizedDir}/`)
+    ) {
+      await stopWatcherEntry(key);
     }
   }
 }
@@ -85,16 +159,17 @@ export function registerFileHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.FILE_SAVE_TO_TEMP,
     async (
-      _,
+      event,
       filename: string,
       data: Uint8Array
     ): Promise<{ success: boolean; path?: string; error?: string }> => {
       try {
         const tempDir = app.getPath('temp');
         const ensoaiInputDir = join(tempDir, 'ensoai-input');
+        ensureFileOwnerCleanup(event.sender);
         // Allow renderer to preview saved temp images via local-file:// protocol.
         // Without this, local-file access is denied by default.
-        registerAllowedLocalFileRoot(ensoaiInputDir);
+        registerAllowedLocalFileRoot(ensoaiInputDir, event.sender.id);
         await mkdir(ensoaiInputDir, { recursive: true });
 
         // Defense-in-depth: never trust renderer-controlled path segments.
@@ -223,9 +298,10 @@ export function registerFileHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.FILE_LIST,
-    async (_, dirPath: string, gitRoot?: string): Promise<FileEntry[]> => {
+    async (event, dirPath: string, gitRoot?: string): Promise<FileEntry[]> => {
+      ensureFileOwnerCleanup(event.sender);
       if (gitRoot) {
-        registerAllowedLocalFileRoot(gitRoot);
+        registerAllowedLocalFileRoot(gitRoot, event.sender.id);
       }
 
       const entries = await readdir(dirPath);
@@ -276,10 +352,11 @@ export function registerFileHandlers(): void {
   );
 
   ipcMain.handle(IPC_CHANNELS.FILE_WATCH_START, async (event, dirPath: string) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window) return;
+    ensureFileOwnerCleanup(event.sender);
+    const ownerId = event.sender.id;
+    const watcherKey = getWatcherKey(ownerId, dirPath);
 
-    if (watchers.has(dirPath)) {
+    if (watchers.has(watcherKey)) {
       return;
     }
 
@@ -287,7 +364,7 @@ export function registerFileHandlers(): void {
     const MAX_FLUSH_EVENTS = 500;
     const FLUSH_DELAY_MS = 100;
 
-    const pendingEvents = new Map<string, 'create' | 'update' | 'delete'>();
+    const pendingEvents = new Map<string, FileWatcherEventType>();
     let bulkMode = false;
     let flushTimer: NodeJS.Timeout | null = null;
 
@@ -304,20 +381,20 @@ export function registerFileHandlers(): void {
       if (flushTimer) return;
       flushTimer = setTimeout(() => {
         flushTimer = null;
-        if (window.isDestroyed()) {
-          cleanup();
+        if (event.sender.isDestroyed()) {
+          void stopWatcherEntry(watcherKey);
           return;
         }
 
         if (bulkMode || pendingEvents.size > MAX_FLUSH_EVENTS) {
           const normalizedDir = dirPath.replace(/\\/g, '/');
-          window.webContents.send(IPC_CHANNELS.FILE_CHANGE, {
+          event.sender.send(IPC_CHANNELS.FILE_CHANGE, {
             type: 'update',
             path: `${normalizedDir}/.enso-bulk`,
           });
         } else {
           for (const [path, type] of pendingEvents) {
-            window.webContents.send(IPC_CHANNELS.FILE_CHANGE, { type, path });
+            event.sender.send(IPC_CHANNELS.FILE_CHANGE, { type, path });
           }
         }
 
@@ -327,7 +404,10 @@ export function registerFileHandlers(): void {
     };
 
     const watcher = new FileWatcher(dirPath, (eventType, changedPath) => {
-      if (window.isDestroyed()) return;
+      if (event.sender.isDestroyed()) {
+        void stopWatcherEntry(watcherKey);
+        return;
+      }
 
       if (bulkMode) {
         scheduleFlush();
@@ -343,19 +423,39 @@ export function registerFileHandlers(): void {
       scheduleFlush();
     });
 
-    await watcher.start();
-    watchers.set(dirPath, watcher);
-    watcherCleanups.set(dirPath, cleanup);
+    const entry: FileWatcherEntry = {
+      watcher,
+      dirPath,
+      normalizedDirPath: normalizeWatchedPath(dirPath),
+      ownerId,
+      state: 'starting',
+      startPromise: Promise.resolve(),
+      cleanup,
+    };
+    watchers.set(watcherKey, entry);
+    trackWatcherKey(ownerId, watcherKey);
+
+    const startPromise = watcher.start();
+    entry.startPromise = startPromise;
+
+    try {
+      await startPromise;
+
+      if (!watchers.has(watcherKey)) {
+        await watcher.stop().catch(() => {});
+        return;
+      }
+
+      entry.state = 'running';
+    } catch (error) {
+      await stopWatcherEntry(watcherKey);
+      throw error;
+    }
   });
 
-  ipcMain.handle(IPC_CHANNELS.FILE_WATCH_STOP, async (_, dirPath: string) => {
-    const watcher = watchers.get(dirPath);
-    if (watcher) {
-      watcherCleanups.get(dirPath)?.();
-      await watcher.stop();
-      watchers.delete(dirPath);
-      watcherCleanups.delete(dirPath);
-    }
+  ipcMain.handle(IPC_CHANNELS.FILE_WATCH_STOP, async (event, dirPath: string) => {
+    const watcherKey = getWatcherKey(event.sender.id, dirPath);
+    await stopWatcherEntry(watcherKey);
   });
 
   // FILE_COPY: Copy a single file/directory
@@ -558,16 +658,10 @@ async function copyDirectory(source: string, target: string): Promise<void> {
 }
 
 export async function stopAllFileWatchers(): Promise<void> {
-  const stopPromises: Promise<void>[] = [];
-  for (const watcher of watchers.values()) {
-    stopPromises.push(watcher.stop());
-  }
-  await Promise.all(stopPromises);
-  watchers.clear();
-  for (const cleanup of watcherCleanups.values()) {
-    cleanup();
-  }
-  watcherCleanups.clear();
+  const keys = Array.from(watchers.keys());
+  await Promise.all(keys.map((key) => stopWatcherEntry(key)));
+  ownerWatcherKeys.clear();
+  fileResourceOwners.clear();
 }
 
 /**
@@ -575,14 +669,14 @@ export async function stopAllFileWatchers(): Promise<void> {
  * Fires unsubscribe without waiting - process will exit anyway.
  */
 export function stopAllFileWatchersSync(): void {
-  for (const watcher of watchers.values()) {
-    watcher.stop().catch(() => {});
+  for (const [key, entry] of watchers.entries()) {
+    entry.cleanup();
+    entry.watcher.stop().catch(() => {});
+    untrackWatcherKey(entry.ownerId, key);
   }
   watchers.clear();
-  for (const cleanup of watcherCleanups.values()) {
-    cleanup();
-  }
-  watcherCleanups.clear();
+  ownerWatcherKeys.clear();
+  fileResourceOwners.clear();
 }
 
 /**

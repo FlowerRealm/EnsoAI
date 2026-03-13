@@ -3,10 +3,24 @@ import {
   type TerminalCreateOptions,
   type TerminalResizeOptions,
 } from '@shared/types';
-import { BrowserWindow, ipcMain } from 'electron';
+import { ipcMain, type WebContents } from 'electron';
 import { PtyManager } from '../services/terminal/PtyManager';
 
 export const ptyManager = new PtyManager();
+const terminalCleanupOwners = new Set<number>();
+
+function ensureTerminalCleanup(sender: WebContents): void {
+  const ownerId = sender.id;
+  if (terminalCleanupOwners.has(ownerId)) {
+    return;
+  }
+
+  terminalCleanupOwners.add(ownerId);
+  sender.once('destroyed', () => {
+    terminalCleanupOwners.delete(ownerId);
+    ptyManager.destroyByOwner(ownerId);
+  });
+}
 
 export function destroyAllTerminals(): void {
   ptyManager.destroyAll();
@@ -24,23 +38,22 @@ export function registerTerminalHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.TERMINAL_CREATE,
     async (event, options: TerminalCreateOptions = {}) => {
-      const window = BrowserWindow.fromWebContents(event.sender);
-      if (!window) {
-        throw new Error('No window found');
-      }
+      ensureTerminalCleanup(event.sender);
+      const ownerId = event.sender.id;
 
       const id = ptyManager.create(
         options,
         (data) => {
-          if (!window.isDestroyed()) {
-            window.webContents.send(IPC_CHANNELS.TERMINAL_DATA, { id, data });
+          if (!event.sender.isDestroyed()) {
+            event.sender.send(IPC_CHANNELS.TERMINAL_DATA, { id, data });
           }
         },
         (exitCode, signal) => {
-          if (!window.isDestroyed()) {
-            window.webContents.send(IPC_CHANNELS.TERMINAL_EXIT, { id, exitCode, signal });
+          if (!event.sender.isDestroyed()) {
+            event.sender.send(IPC_CHANNELS.TERMINAL_EXIT, { id, exitCode, signal });
           }
-        }
+        },
+        ownerId
       );
 
       return id;

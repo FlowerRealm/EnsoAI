@@ -50,6 +50,8 @@
       this.resetMenuCommandId = null;
       this.shortcutMenuId = null;
       this.dragOffset = { x: 0, y: 0 };
+      this.boundInspectorMove = this.handleInspectorMove.bind(this);
+      this.boundInspectorClick = this.handleInspectorClick.bind(this);
 
       this.init();
     }
@@ -485,16 +487,16 @@
         btn.classList.add('active');
         btn.innerHTML = CONFIG.ICONS.CLOSE;
         document.body.style.cursor = 'crosshair';
-        document.addEventListener('mousemove', this.handleInspectorMove.bind(this), true);
-        document.addEventListener('click', this.handleInspectorClick.bind(this), true);
+        document.addEventListener('mousemove', this.boundInspectorMove, true);
+        document.addEventListener('click', this.boundInspectorClick, true);
       } else {
         btn.classList.remove('active');
         btn.innerHTML = CONFIG.ICONS.TARGET;
         document.body.style.cursor = '';
         overlay.style.display = 'none';
         label.style.display = 'none';
-        document.removeEventListener('mousemove', this.handleInspectorMove.bind(this), true);
-        document.removeEventListener('click', this.handleInspectorClick.bind(this), true);
+        document.removeEventListener('mousemove', this.boundInspectorMove, true);
+        document.removeEventListener('click', this.boundInspectorClick, true);
       }
     }
 
