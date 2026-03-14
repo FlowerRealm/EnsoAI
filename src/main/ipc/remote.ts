@@ -40,6 +40,22 @@ export function registerRemoteHandlers(): void {
     return remoteConnectionManager.getStatus(connectionId);
   });
 
+  ipcMain.handle(IPC_CHANNELS.REMOTE_HELPER_STATUS, async (_, profileOrId) => {
+    return remoteConnectionManager.getHelperStatus(profileOrId as string | ConnectionProfile);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_HELPER_INSTALL, async (_, profileOrId) => {
+    return remoteConnectionManager.installHelperManually(profileOrId as string | ConnectionProfile);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_HELPER_UPDATE, async (_, profileOrId) => {
+    return remoteConnectionManager.updateHelper(profileOrId as string | ConnectionProfile);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REMOTE_HELPER_DELETE, async (_, profileOrId) => {
+    return remoteConnectionManager.deleteHelper(profileOrId as string | ConnectionProfile);
+  });
+
   ipcMain.handle(IPC_CHANNELS.REMOTE_BROWSE_ROOTS, async (_, profileOrId) => {
     return remoteConnectionManager.browseRoots(profileOrId as string | ConnectionProfile);
   });

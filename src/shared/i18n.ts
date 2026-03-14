@@ -1007,6 +1007,37 @@ export const zhTranslations: Record<string, string> = {
   'Helper install directory': '助手安装目录',
   'Optional override, for example ~/.ensoai/remote-helper':
     '可选覆盖目录，例如 ~/.ensoai/remote-helper',
+  'Remote Helper': '远程助手',
+  'Install, refresh, update, or remove the helper on the selected remote host.':
+    '在选中的远程主机上安装、刷新、更新或删除助手。',
+  'Select a profile': '选择一个配置',
+  'Choose a saved SSH profile above before managing the remote helper.':
+    '请先在上方选择一个已保存的 SSH 配置，再管理远程助手。',
+  'Helper status': '助手状态',
+  'Current version': '当前版本',
+  'Install directory': '安装目录',
+  'Installed versions': '已安装版本',
+  Connection: '连接状态',
+  Connected: '已连接',
+  Disconnected: '未连接',
+  'Refresh status': '刷新状态',
+  Update: '更新',
+  'Delete helper': '删除助手',
+  'Delete remote helper?': '删除远程助手？',
+  'This will remove all installed helper versions for this SSH profile.':
+    '这会删除该 SSH 配置下安装的所有助手版本。',
+  'Failed to refresh helper status': '刷新助手状态失败',
+  'Failed to install helper': '安装助手失败',
+  'Failed to update helper': '更新助手失败',
+  'Failed to delete helper': '删除助手失败',
+  'Helper installed': '助手已安装',
+  'The current remote helper version is now installed.': '当前远程助手版本已安装。',
+  'Helper updated': '助手已更新',
+  'The current remote helper version was reinstalled successfully.':
+    '当前远程助手版本已成功重新安装。',
+  'Helper deleted': '助手已删除',
+  'All installed helper versions for this profile were removed.':
+    '该配置下所有已安装的助手版本都已删除。',
   'Platform hint': '平台提示',
   'Auto detect': '自动识别',
   'Save profile': '保存配置',
@@ -1081,6 +1112,7 @@ export const zhTranslations: Record<string, string> = {
   Connect: '连接',
   'Failed to test remote connection': '测试远程连接失败',
   'Failed to resolve remote home directory': '获取远程主目录失败',
+  'Remote helper bootstrap timed out': '远程助手启动校验超时',
   'Remote helper exited ({{reason}})': '远程助手已退出（{{reason}}）',
   'Remote helper disconnected': '远程助手连接已断开',
   'Failed to establish remote helper for {{connectionId}}':

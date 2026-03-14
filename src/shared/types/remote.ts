@@ -21,6 +21,17 @@ export interface RemoteConnectionStatus {
   lastCheckedAt?: number;
 }
 
+export interface RemoteHelperStatus {
+  connectionId: string;
+  installed: boolean;
+  installDir: string;
+  installedVersions: string[];
+  currentVersion: string;
+  connected: boolean;
+  error?: string;
+  lastCheckedAt?: number;
+}
+
 export interface ConnectionTestResult {
   success: boolean;
   platform?: RemotePlatform;

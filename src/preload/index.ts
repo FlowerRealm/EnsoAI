@@ -39,6 +39,7 @@ import type {
   RemoteAuthPrompt,
   RemoteAuthResponse,
   RemoteConnectionStatus,
+  RemoteHelperStatus,
   ShellConfig,
   ShellInfo,
   TempWorkspaceCheckResult,
@@ -472,6 +473,14 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_DISCONNECT, connectionId),
     getStatus: (connectionId: string): Promise<RemoteConnectionStatus> =>
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_GET_STATUS, connectionId),
+    getHelperStatus: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_STATUS, profileOrId),
+    installHelper: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_INSTALL, profileOrId),
+    updateHelper: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_UPDATE, profileOrId),
+    deleteHelper: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_DELETE, profileOrId),
     browseRoots: (profileOrId: string | ConnectionProfile): Promise<string[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_BROWSE_ROOTS, profileOrId),
     onAuthPrompt: (callback: (prompt: RemoteAuthPrompt) => void): (() => void) => {

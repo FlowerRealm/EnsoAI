@@ -1,7 +1,30 @@
-import type { ConnectionProfile, ConnectionTestResult, RemotePlatform } from '@shared/types';
-import { Loader2, RefreshCw, Save, Server, TestTube2, Trash2 } from 'lucide-react';
+import type {
+  ConnectionProfile,
+  ConnectionTestResult,
+  RemoteHelperStatus,
+  RemotePlatform,
+} from '@shared/types';
+import {
+  Download,
+  Loader2,
+  RefreshCw,
+  RotateCw,
+  Save,
+  Server,
+  TestTube2,
+  Trash2,
+} from 'lucide-react';
 import * as React from 'react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from '@/components/ui/card';
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field';
@@ -52,15 +75,25 @@ export function RemoteSettings() {
   const [selectedProfileId, setSelectedProfileId] = React.useState('');
   const [form, setForm] = React.useState<RemoteProfileFormState>(EMPTY_FORM);
   const [isLoading, setIsLoading] = React.useState(true);
-  const [busyAction, setBusyAction] = React.useState<'refresh' | 'save' | 'test' | 'delete' | null>(
-    null
-  );
+  const [busyAction, setBusyAction] = React.useState<
+    | 'refresh'
+    | 'save'
+    | 'test'
+    | 'delete'
+    | 'helper-status'
+    | 'helper-install'
+    | 'helper-update'
+    | 'helper-delete'
+    | null
+  >(null);
   const [feedback, setFeedback] = React.useState<{
     variant: 'error' | 'success' | 'info';
     title: string;
     description: string;
   } | null>(null);
   const [testResult, setTestResult] = React.useState<ConnectionTestResult | null>(null);
+  const [helperStatus, setHelperStatus] = React.useState<RemoteHelperStatus | null>(null);
+  const [deleteHelperDialogOpen, setDeleteHelperDialogOpen] = React.useState(false);
   const selectedProfile = profiles.find((item) => item.id === selectedProfileId);
 
   const syncFormFromProfile = React.useCallback((profile?: ConnectionProfile | null) => {
@@ -107,7 +140,50 @@ export function RemoteSettings() {
     const profile = profiles.find((item) => item.id === selectedProfileId);
     syncFormFromProfile(profile);
     setTestResult(null);
+    setHelperStatus(null);
   }, [profiles, selectedProfileId, syncFormFromProfile]);
+
+  const loadHelperStatus = React.useCallback(
+    async (profileId: string, mode: 'refresh' | 'silent' = 'refresh') => {
+      if (!profileId) {
+        setHelperStatus(null);
+        return null;
+      }
+
+      if (mode === 'refresh') {
+        setBusyAction('helper-status');
+      }
+
+      try {
+        const status = await window.electronAPI.remote.getHelperStatus(profileId);
+        setHelperStatus(status);
+        return status;
+      } catch (error) {
+        setHelperStatus(null);
+        if (mode === 'refresh') {
+          setFeedback({
+            variant: 'error',
+            title: t('Failed to refresh helper status'),
+            description: error instanceof Error ? error.message : t('Unknown error'),
+          });
+        }
+        return null;
+      } finally {
+        if (mode === 'refresh') {
+          setBusyAction(null);
+        }
+      }
+    },
+    [t]
+  );
+
+  React.useEffect(() => {
+    if (!selectedProfileId) {
+      setHelperStatus(null);
+      return;
+    }
+    void loadHelperStatus(selectedProfileId, 'silent');
+  }, [loadHelperStatus, selectedProfileId]);
 
   const buildDraftProfile = React.useCallback((): ConnectionProfile => {
     const now = Date.now();
@@ -158,6 +234,7 @@ export function RemoteSettings() {
         description: t('You can now use it from Add Repository > SSH.'),
       });
       await loadProfiles();
+      await loadHelperStatus(savedProfile.id, 'silent');
     } catch (error) {
       setFeedback({
         variant: 'error',
@@ -167,7 +244,7 @@ export function RemoteSettings() {
     } finally {
       setBusyAction(null);
     }
-  }, [form, loadProfiles, selectedProfileId, t, upsertRemoteProfile]);
+  }, [form, loadHelperStatus, loadProfiles, selectedProfileId, t, upsertRemoteProfile]);
 
   const handleDelete = React.useCallback(async () => {
     if (!selectedProfileId) return;
@@ -178,6 +255,7 @@ export function RemoteSettings() {
       setSelectedProfileId('');
       syncFormFromProfile(null);
       setTestResult(null);
+      setHelperStatus(null);
       setFeedback({
         variant: 'success',
         title: t('Remote profile deleted'),
@@ -234,6 +312,75 @@ export function RemoteSettings() {
     }
   }, [buildDraftProfile, t]);
 
+  const runHelperAction = React.useCallback(
+    async (
+      action: 'install' | 'update' | 'delete',
+      onSuccess: () => { title: string; description: string }
+    ) => {
+      if (!selectedProfileId) return;
+
+      setBusyAction(
+        action === 'install'
+          ? 'helper-install'
+          : action === 'update'
+            ? 'helper-update'
+            : 'helper-delete'
+      );
+
+      try {
+        const nextStatus =
+          action === 'install'
+            ? await window.electronAPI.remote.installHelper(selectedProfileId)
+            : action === 'update'
+              ? await window.electronAPI.remote.updateHelper(selectedProfileId)
+              : await window.electronAPI.remote.deleteHelper(selectedProfileId);
+        setHelperStatus(nextStatus);
+        const message = onSuccess();
+        setFeedback({
+          variant: 'success',
+          title: message.title,
+          description: message.description,
+        });
+      } catch (error) {
+        setFeedback({
+          variant: 'error',
+          title:
+            action === 'install'
+              ? t('Failed to install helper')
+              : action === 'update'
+                ? t('Failed to update helper')
+                : t('Failed to delete helper'),
+          description: error instanceof Error ? error.message : t('Unknown error'),
+        });
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [selectedProfileId, t]
+  );
+
+  const handleInstallHelper = React.useCallback(async () => {
+    await runHelperAction('install', () => ({
+      title: t('Helper installed'),
+      description: t('The current remote helper version is now installed.'),
+    }));
+  }, [runHelperAction, t]);
+
+  const handleUpdateHelper = React.useCallback(async () => {
+    await runHelperAction('update', () => ({
+      title: t('Helper updated'),
+      description: t('The current remote helper version was reinstalled successfully.'),
+    }));
+  }, [runHelperAction, t]);
+
+  const handleDeleteHelper = React.useCallback(async () => {
+    setDeleteHelperDialogOpen(false);
+    await runHelperAction('delete', () => ({
+      title: t('Helper deleted'),
+      description: t('All installed helper versions for this profile were removed.'),
+    }));
+  }, [runHelperAction, t]);
+
   const environmentItems = React.useMemo(
     () =>
       testResult?.success
@@ -249,6 +396,42 @@ export function RemoteSettings() {
         : [],
     [t, testResult]
   );
+
+  const helperInfoItems = React.useMemo(
+    () =>
+      helperStatus
+        ? [
+            {
+              label: t('Status'),
+              value: helperStatus.installed ? t('Installed') : t('Not installed'),
+            },
+            { label: t('Current version'), value: helperStatus.currentVersion },
+            { label: t('Install directory'), value: helperStatus.installDir },
+            {
+              label: t('Installed versions'),
+              value:
+                helperStatus.installedVersions.length > 0
+                  ? helperStatus.installedVersions.join(', ')
+                  : '-',
+            },
+            {
+              label: t('Connection'),
+              value: helperStatus.connected ? t('Connected') : t('Disconnected'),
+            },
+          ]
+        : [],
+    [helperStatus, t]
+  );
+
+  const helperBusy =
+    busyAction === 'helper-status' ||
+    busyAction === 'helper-install' ||
+    busyAction === 'helper-update' ||
+    busyAction === 'helper-delete';
+  const hasSelectedProfile = Boolean(selectedProfileId);
+  const helperInstalled = helperStatus?.installed ?? false;
+  const currentVersionInstalled =
+    helperStatus?.installedVersions.includes(helperStatus.currentVersion) ?? false;
 
   return (
     <div className="space-y-6">
@@ -307,6 +490,7 @@ export function RemoteSettings() {
                   syncFormFromProfile(null);
                   setFeedback(null);
                   setTestResult(null);
+                  setHelperStatus(null);
                 }}
               >
                 <Server className="h-4 w-4 shrink-0" />
@@ -436,6 +620,115 @@ export function RemoteSettings() {
         </CardPanel>
       </Card>
 
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>{t('Remote Helper')}</CardTitle>
+          <CardDescription>
+            {t('Install, refresh, update, or remove the helper on the selected remote host.')}
+          </CardDescription>
+        </CardHeader>
+        <CardPanel className="space-y-6">
+          {!hasSelectedProfile ? (
+            <Alert variant="info">
+              <AlertTitle>{t('Select a profile')}</AlertTitle>
+              <AlertDescription>
+                {t('Choose a saved SSH profile above before managing the remote helper.')}
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <>
+              {helperStatus?.error && (
+                <Alert variant="error">
+                  <AlertTitle>{t('Failed to refresh helper status')}</AlertTitle>
+                  <AlertDescription>{helperStatus.error}</AlertDescription>
+                </Alert>
+              )}
+
+              {helperStatus && (
+                <Alert variant="info">
+                  <AlertTitle>{t('Helper status')}</AlertTitle>
+                  <AlertDescription className="grid gap-3 sm:grid-cols-2">
+                    {helperInfoItems.map((item) => (
+                      <div
+                        key={item.label}
+                        className="min-w-0 rounded-lg bg-background/70 px-3 py-2"
+                      >
+                        <div className="text-muted-foreground text-xs">{item.label}</div>
+                        <div className="mt-1 break-all font-medium text-foreground text-sm">
+                          {item.value}
+                        </div>
+                      </div>
+                    ))}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-center"
+                  onClick={() => void loadHelperStatus(selectedProfileId)}
+                  disabled={!hasSelectedProfile || helperBusy}
+                >
+                  {busyAction === 'helper-status' ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 shrink-0" />
+                  )}
+                  <span>{t('Refresh status')}</span>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-center"
+                  onClick={() => void handleInstallHelper()}
+                  disabled={!hasSelectedProfile || helperBusy || currentVersionInstalled}
+                >
+                  {busyAction === 'helper-install' ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4 shrink-0" />
+                  )}
+                  <span>{t('Install')}</span>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-center"
+                  onClick={() => void handleUpdateHelper()}
+                  disabled={!hasSelectedProfile || helperBusy || !helperInstalled}
+                >
+                  {busyAction === 'helper-update' ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  ) : (
+                    <RotateCw className="h-4 w-4 shrink-0" />
+                  )}
+                  <span>{t('Update')}</span>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="destructive-outline"
+                  className="w-full justify-center"
+                  onClick={() => setDeleteHelperDialogOpen(true)}
+                  disabled={!hasSelectedProfile || helperBusy || !helperInstalled}
+                >
+                  {busyAction === 'helper-delete' ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 shrink-0" />
+                  )}
+                  <span>{t('Delete helper')}</span>
+                </Button>
+              </div>
+            </>
+          )}
+        </CardPanel>
+      </Card>
+
       {feedback && (
         <Alert variant={feedback.variant}>
           <AlertTitle>{feedback.title}</AlertTitle>
@@ -458,6 +751,23 @@ export function RemoteSettings() {
           </AlertDescription>
         </Alert>
       )}
+
+      <AlertDialog open={deleteHelperDialogOpen} onOpenChange={setDeleteHelperDialogOpen}>
+        <AlertDialogPopup className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Delete remote helper?')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('This will remove all installed helper versions for this SSH profile.')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline">{t('Cancel')}</Button>} />
+            <Button variant="destructive" onClick={() => void handleDeleteHelper()}>
+              {t('Delete helper')}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
     </div>
   );
 }

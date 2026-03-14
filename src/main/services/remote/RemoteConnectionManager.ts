@@ -6,6 +6,7 @@ import type {
   ConnectionTestResult,
   RemoteAuthResponse,
   RemoteConnectionStatus,
+  RemoteHelperStatus,
   RemoteHostFingerprint,
   RemotePlatform,
 } from '@shared/types';
@@ -28,6 +29,7 @@ interface HelperProcess {
     }
   >;
   buffer: string;
+  closed: boolean;
   status: RemoteConnectionStatus;
 }
 
@@ -58,9 +60,30 @@ interface LocalCommandResult {
   code: number | null;
 }
 
+interface HelperInstallPaths {
+  helperInstallDir: string;
+  helperDir: string;
+  helperPath: string;
+}
+
+interface HelperEnvironmentInfo {
+  platform: RemotePlatform;
+  homeDir: string;
+  nodeVersion: string;
+  gitVersion: string;
+}
+
+interface RemoteDirectoryEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}
+
 type RemoteEventListener = (payload: unknown) => void;
 
 const DEFAULT_HELPER_DIR = '.ensoai/remote-helper';
+const HELPER_FILENAME = 'enso-remote-helper.cjs';
+const HELPER_BOOTSTRAP_TIMEOUT_MS = 5_000;
 const REMOTE_SETTINGS_PATH = 'remote-connections.json';
 const REMOTE_KNOWN_HOSTS_PATH = 'remote-known_hosts';
 const SSH_KEYSCAN_TIMEOUT_SECONDS = 5;
@@ -73,8 +96,20 @@ function normalizeLineEndings(input: string): string {
   return input.replace(/\r\n/g, '\n');
 }
 
+function normalizeRemotePath(input: string): string {
+  const replaced = input.replace(/\\/g, '/').replace(/\/+$/g, '');
+  if (/^[A-Za-z]:$/.test(replaced)) {
+    return `${replaced}/`;
+  }
+  return replaced || '/';
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function isVersionDirectoryName(name: string): boolean {
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(name);
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -245,6 +280,7 @@ async function runLocalCommand(
 export class RemoteConnectionManager {
   private profiles = new Map<string, ConnectionProfile>();
   private helpers = new Map<string, HelperProcess>();
+  private pendingConnections = new Map<string, Promise<RemoteConnectionStatus>>();
   private runtimes = new Map<string, ConnectionRuntime>();
   private readonly authBroker = new RemoteAuthBroker();
   private loaded = false;
@@ -332,6 +368,73 @@ export class RemoteConnectionManager {
     }
   }
 
+  async getHelperStatus(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+    const profile = await this.resolveProfile(profileOrId);
+    const connected = this.helpers.get(profile.id)?.status.connected ?? false;
+
+    try {
+      const runtime = await this.resolveRuntime(profile, false);
+      const helperPaths = this.getHelperInstallPaths(profile, runtime);
+      const installedVersions = await this.listInstalledHelperVersions(
+        profile,
+        runtime,
+        helperPaths
+      );
+      return {
+        connectionId: profile.id,
+        installed: installedVersions.length > 0,
+        installDir: helperPaths.helperInstallDir,
+        installedVersions,
+        currentVersion: REMOTE_HELPER_VERSION,
+        connected,
+        lastCheckedAt: now(),
+      };
+    } catch (error) {
+      const helperInstallDir = profile.helperInstallDir?.trim()
+        ? normalizeRemotePath(profile.helperInstallDir)
+        : DEFAULT_HELPER_DIR;
+      return {
+        connectionId: profile.id,
+        installed: false,
+        installDir: helperInstallDir,
+        installedVersions: [],
+        currentVersion: REMOTE_HELPER_VERSION,
+        connected,
+        error: error instanceof Error ? error.message : String(error),
+        lastCheckedAt: now(),
+      };
+    }
+  }
+
+  async installHelperManually(
+    profileOrId: string | ConnectionProfile
+  ): Promise<RemoteHelperStatus> {
+    const profile = await this.resolveProfile(profileOrId);
+    const runtime = await this.resolveRuntime(profile, false);
+    const helperPaths = this.getHelperInstallPaths(profile, runtime);
+    await this.installHelper(profile, runtime, helperPaths);
+    return this.getHelperStatus(profile);
+  }
+
+  async updateHelper(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+    const profile = await this.resolveProfile(profileOrId);
+    await this.disconnect(profile.id).catch(() => {});
+    const runtime = await this.resolveRuntime(profile, false);
+    const helperPaths = this.getHelperInstallPaths(profile, runtime);
+    await this.installHelper(profile, runtime, helperPaths);
+    await this.cleanupOldHelperVersionsOnHost(profile, runtime, helperPaths);
+    return this.getHelperStatus(profile);
+  }
+
+  async deleteHelper(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+    const profile = await this.resolveProfile(profileOrId);
+    await this.disconnect(profile.id).catch(() => {});
+    const runtime = await this.resolveRuntime(profile, false);
+    const helperPaths = this.getHelperInstallPaths(profile, runtime);
+    await this.deleteInstalledHelperVersions(profile, runtime, helperPaths);
+    return this.getHelperStatus(profile);
+  }
+
   async connect(profileOrId: string | ConnectionProfile): Promise<RemoteConnectionStatus> {
     const profile = await this.resolveProfile(profileOrId);
     const existing = this.helpers.get(profile.id);
@@ -339,140 +442,19 @@ export class RemoteConnectionManager {
       return existing.status;
     }
 
-    const runtime = await this.resolveRuntime(profile, false);
-    const helperInstallDir =
-      profile.helperInstallDir?.trim() ||
-      `${runtime.homeDir.replace(/\\/g, '/')}/${DEFAULT_HELPER_DIR}`;
-    const helperDir = `${helperInstallDir}/${REMOTE_HELPER_VERSION}`;
-    const helperFilename = 'enso-remote-helper.cjs';
-    const helperPath = `${helperDir}/${helperFilename}`;
-
-    await this.execSsh(
-      profile,
-      [
-        runtime.platform === 'win32'
-          ? `powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '${helperDir.replace(/'/g, "''")}' | Out-Null"`
-          : `mkdir -p ${shellQuote(helperDir)}`,
-      ],
-      runtime.resolvedHost
-    );
-
-    const helperSource = normalizeLineEndings(getRemoteHelperSource());
-    const encoded = Buffer.from(helperSource, 'utf8').toString('base64');
-    const writeCommand =
-      runtime.platform === 'win32'
-        ? [
-            'powershell',
-            '-NoProfile',
-            '-Command',
-            `[IO.File]::WriteAllBytes('${helperPath.replace(/'/g, "''")}', [Convert]::FromBase64String('${encoded}'))`,
-          ]
-        : [buildPosixNodeWriteCommand(helperPath, encoded)];
-    await this.execSsh(profile, writeCommand, runtime.resolvedHost);
-
-    if (runtime.platform !== 'win32') {
-      await this.execSsh(profile, [`chmod +x ${shellQuote(helperPath)}`], runtime.resolvedHost);
+    const pending = this.pendingConnections.get(profile.id);
+    if (pending) {
+      return pending;
     }
 
-    const helperCommand =
-      runtime.platform === 'win32'
-        ? `node "${helperPath.replace(/\//g, '\\')}" --stdio`
-        : `node ${shellQuote(helperPath)} --stdio`;
-    const { spawn } = await import('node:child_process');
-    const sshContext = await this.buildSshContext(profile, runtime.resolvedHost);
-    const proc = spawn('ssh', [...sshContext.optionArgs, profile.sshTarget, helperCommand], {
-      env: sshContext.env,
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    const helper: HelperProcess = {
-      connectionId: profile.id,
-      profile,
-      proc,
-      nextRequestId: 1,
-      pending: new Map(),
-      buffer: '',
-      status: {
-        connectionId: profile.id,
-        connected: true,
-        helperVersion: REMOTE_HELPER_VERSION,
-        platform: runtime.platform,
-        lastCheckedAt: now(),
-      },
-    };
-
-    proc.stdout.setEncoding('utf8');
-    proc.stdout.on('data', (chunk: string) => {
-      helper.buffer += chunk;
-      const lines = helper.buffer.split('\n');
-      helper.buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let message: {
-          type?: string;
-          id?: number;
-          result?: unknown;
-          error?: string;
-          event?: string;
-          payload?: unknown;
-        };
-        try {
-          message = JSON.parse(line);
-        } catch (error) {
-          console.warn('[remote] Failed to parse helper output:', error);
-          continue;
-        }
-        if (message.type === 'response' && typeof message.id === 'number') {
-          const pending = helper.pending.get(message.id);
-          if (!pending) continue;
-          helper.pending.delete(message.id);
-          if (message.error) {
-            pending.reject(new Error(message.error));
-          } else {
-            pending.resolve(message.result);
-          }
-        } else if (message.type === 'event' && message.event) {
-          helper.proc.emit(`remote:${message.event}`, message.payload);
-        }
+    const connectionAttempt = this.establishHelperConnection(profile).finally(() => {
+      if (this.pendingConnections.get(profile.id) === connectionAttempt) {
+        this.pendingConnections.delete(profile.id);
       }
     });
 
-    proc.stderr.setEncoding('utf8');
-    proc.stderr.on('data', (chunk: string) => {
-      const text = chunk.trim();
-      if (!text) {
-        return;
-      }
-      if (isAuthenticationFailure(text)) {
-        this.authBroker.clearSecrets(profile.id);
-      }
-      console.warn(`[remote:${profile.name}] ${text}`);
-    });
-
-    proc.on('exit', (code, signal) => {
-      helper.status = {
-        ...helper.status,
-        connected: false,
-        error:
-          code === 0
-            ? undefined
-            : translateRemote('Remote helper exited ({{reason}})', {
-                reason: `${code ?? 'signal'}${signal ? `/${signal}` : ''}`,
-              }),
-        lastCheckedAt: now(),
-      };
-      for (const pending of helper.pending.values()) {
-        pending.reject(
-          new Error(helper.status.error || translateRemote('Remote helper disconnected'))
-        );
-      }
-      helper.pending.clear();
-      this.helpers.delete(profile.id);
-    });
-
-    this.helpers.set(profile.id, helper);
-    return helper.status;
+    this.pendingConnections.set(profile.id, connectionAttempt);
+    return connectionAttempt;
   }
 
   async disconnect(connectionId: string): Promise<void> {
@@ -514,17 +496,7 @@ export class RemoteConnectionManager {
     params: Record<string, unknown>
   ): Promise<T> {
     const helper = this.helpers.get(connectionId) ?? (await this.ensureConnected(connectionId));
-    const id = helper.nextRequestId++;
-    const payload = JSON.stringify({ id, method, params });
-    return new Promise<T>((resolve, reject) => {
-      helper.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-      helper.proc.stdin.write(`${payload}\n`, 'utf8', (error) => {
-        if (error) {
-          helper.pending.delete(id);
-          reject(error);
-        }
-      });
-    });
+    return this.callHelper<T>(helper, method, params);
   }
 
   async addEventListener(
@@ -554,6 +526,475 @@ export class RemoteConnectionManager {
       });
     }
     return helper;
+  }
+
+  private async establishHelperConnection(
+    profile: ConnectionProfile
+  ): Promise<RemoteConnectionStatus> {
+    const runtime = await this.resolveRuntime(profile, false);
+    const helperPaths = this.getHelperInstallPaths(profile, runtime);
+
+    try {
+      return await this.startConnectedHelper(profile, runtime, helperPaths);
+    } catch (reuseError) {
+      const detail = reuseError instanceof Error ? reuseError.message : String(reuseError);
+      console.warn(
+        `[remote:${profile.name}] Failed to reuse helper, reinstalling current version: ${detail}`
+      );
+    }
+
+    await this.installHelper(profile, runtime, helperPaths);
+    return this.startConnectedHelper(profile, runtime, helperPaths);
+  }
+
+  private getHelperInstallPaths(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime
+  ): HelperInstallPaths {
+    const helperInstallDir = normalizeRemotePath(
+      profile.helperInstallDir?.trim() ||
+        `${runtime.homeDir.replace(/\\/g, '/')}/${DEFAULT_HELPER_DIR}`
+    );
+    const helperDir = normalizeRemotePath(`${helperInstallDir}/${REMOTE_HELPER_VERSION}`);
+    return {
+      helperInstallDir,
+      helperDir,
+      helperPath: normalizeRemotePath(`${helperDir}/${HELPER_FILENAME}`),
+    };
+  }
+
+  private async installHelper(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths
+  ): Promise<void> {
+    await this.execSsh(
+      profile,
+      [
+        runtime.platform === 'win32'
+          ? `powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '${helperPaths.helperDir.replace(/'/g, "''")}' | Out-Null"`
+          : `mkdir -p ${shellQuote(helperPaths.helperDir)}`,
+      ],
+      runtime.resolvedHost
+    );
+
+    const helperSource = normalizeLineEndings(getRemoteHelperSource());
+    const encoded = Buffer.from(helperSource, 'utf8').toString('base64');
+    const writeCommand =
+      runtime.platform === 'win32'
+        ? [
+            'powershell',
+            '-NoProfile',
+            '-Command',
+            `[IO.File]::WriteAllBytes('${helperPaths.helperPath.replace(/'/g, "''")}', [Convert]::FromBase64String('${encoded}'))`,
+          ]
+        : [buildPosixNodeWriteCommand(helperPaths.helperPath, encoded)];
+    await this.execSsh(profile, writeCommand, runtime.resolvedHost);
+
+    if (runtime.platform !== 'win32') {
+      await this.execSsh(
+        profile,
+        [`chmod +x ${shellQuote(helperPaths.helperPath)}`],
+        runtime.resolvedHost
+      );
+    }
+  }
+
+  private async startConnectedHelper(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths
+  ): Promise<RemoteConnectionStatus> {
+    const helper = await this.spawnHelperProcess(profile, runtime, helperPaths.helperPath);
+    try {
+      const envInfo = await this.callHelper<HelperEnvironmentInfo>(
+        helper,
+        'env:test',
+        {},
+        HELPER_BOOTSTRAP_TIMEOUT_MS
+      );
+      helper.status = {
+        ...helper.status,
+        connected: true,
+        error: undefined,
+        platform: envInfo.platform,
+        lastCheckedAt: now(),
+      };
+      this.helpers.set(profile.id, helper);
+      void this.cleanupOldHelperVersions(helper, helperPaths).catch((error) => {
+        console.warn(
+          `[remote:${profile.name}] Failed to clean up old helper versions: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
+      return helper.status;
+    } catch (error) {
+      helper.proc.kill('SIGTERM');
+      throw error;
+    }
+  }
+
+  private async spawnHelperProcess(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPath: string
+  ): Promise<HelperProcess> {
+    const { spawn } = await import('node:child_process');
+    const helperCommand =
+      runtime.platform === 'win32'
+        ? `node "${helperPath.replace(/\//g, '\\')}" --stdio`
+        : `node ${shellQuote(helperPath)} --stdio`;
+    const sshContext = await this.buildSshContext(profile, runtime.resolvedHost);
+    const proc = spawn('ssh', [...sshContext.optionArgs, profile.sshTarget, helperCommand], {
+      env: sshContext.env,
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const helper: HelperProcess = {
+      connectionId: profile.id,
+      profile,
+      proc,
+      nextRequestId: 1,
+      pending: new Map(),
+      buffer: '',
+      closed: false,
+      status: {
+        connectionId: profile.id,
+        connected: false,
+        helperVersion: REMOTE_HELPER_VERSION,
+        platform: runtime.platform,
+        lastCheckedAt: now(),
+      },
+    };
+
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk: string) => {
+      helper.buffer += chunk;
+      const lines = helper.buffer.split('\n');
+      helper.buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let message: {
+          type?: string;
+          id?: number;
+          result?: unknown;
+          error?: string;
+          event?: string;
+          payload?: unknown;
+        };
+        try {
+          message = JSON.parse(line);
+        } catch (error) {
+          console.warn('[remote] Failed to parse helper output:', error);
+          continue;
+        }
+        if (message.type === 'response' && typeof message.id === 'number') {
+          const pending = helper.pending.get(message.id);
+          if (!pending) continue;
+          if (message.error) {
+            pending.reject(new Error(message.error));
+          } else {
+            pending.resolve(message.result);
+          }
+        } else if (message.type === 'event' && message.event) {
+          helper.proc.emit(`remote:${message.event}`, message.payload);
+        }
+      }
+    });
+
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (chunk: string) => {
+      const text = chunk.trim();
+      if (!text) {
+        return;
+      }
+      if (isAuthenticationFailure(text)) {
+        this.authBroker.clearSecrets(profile.id);
+      }
+      console.warn(`[remote:${profile.name}] ${text}`);
+    });
+
+    proc.on('error', (error) => {
+      this.finalizeHelperShutdown(helper, error.message);
+    });
+
+    proc.on('exit', (code, signal) => {
+      this.finalizeHelperShutdown(
+        helper,
+        code === 0
+          ? undefined
+          : translateRemote('Remote helper exited ({{reason}})', {
+              reason: `${code ?? 'signal'}${signal ? `/${signal}` : ''}`,
+            })
+      );
+    });
+
+    return helper;
+  }
+
+  private finalizeHelperShutdown(helper: HelperProcess, error?: string): void {
+    if (helper.closed) {
+      return;
+    }
+    helper.closed = true;
+    helper.status = {
+      ...helper.status,
+      connected: false,
+      error,
+      lastCheckedAt: now(),
+    };
+    for (const pending of helper.pending.values()) {
+      pending.reject(
+        new Error(helper.status.error || translateRemote('Remote helper disconnected'))
+      );
+    }
+    helper.pending.clear();
+    if (this.helpers.get(helper.connectionId) === helper) {
+      this.helpers.delete(helper.connectionId);
+    }
+  }
+
+  private async callHelper<T = unknown>(
+    helper: HelperProcess,
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<T> {
+    const id = helper.nextRequestId++;
+    const payload = JSON.stringify({ id, method, params });
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const finish = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        helper.pending.delete(id);
+        callback();
+      };
+
+      helper.pending.set(id, {
+        resolve: (value) => finish(() => resolve(value as T)),
+        reject: (error) => finish(() => reject(error)),
+      });
+
+      helper.proc.stdin.write(`${payload}\n`, 'utf8', (error) => {
+        if (error) {
+          finish(() => reject(error));
+        }
+      });
+
+      if (timeoutMs) {
+        timeout = setTimeout(() => {
+          finish(() => reject(new Error(translateRemote('Remote helper bootstrap timed out'))));
+        }, timeoutMs);
+      }
+    });
+  }
+
+  private async cleanupOldHelperVersions(
+    helper: HelperProcess,
+    helperPaths: HelperInstallPaths
+  ): Promise<void> {
+    const runtime = await this.resolveRuntime(helper.profile, false);
+    await this.cleanupOldHelperVersionsOnHost(helper.profile, runtime, helperPaths, helper);
+  }
+
+  private async cleanupOldHelperVersionsOnHost(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths,
+    helper?: HelperProcess
+  ): Promise<void> {
+    const entries = await this.listHelperDirectories(profile, runtime, helperPaths, helper);
+
+    for (const entry of entries) {
+      if (entry.name === REMOTE_HELPER_VERSION) {
+        continue;
+      }
+
+      await this.deleteHelperDirectory(profile, runtime, entry.path, helper);
+    }
+  }
+
+  private async listInstalledHelperVersions(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths
+  ): Promise<string[]> {
+    const entries = await this.listHelperDirectories(profile, runtime, helperPaths);
+    return entries.map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
+  }
+
+  private async deleteInstalledHelperVersions(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths
+  ): Promise<void> {
+    const entries = await this.listHelperDirectories(profile, runtime, helperPaths);
+    for (const entry of entries) {
+      await this.deleteHelperDirectory(profile, runtime, entry.path);
+    }
+  }
+
+  private async listHelperDirectories(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    helperPaths: HelperInstallPaths,
+    helper?: HelperProcess
+  ): Promise<RemoteDirectoryEntry[]> {
+    const entries = helper
+      ? await this.callHelper<RemoteDirectoryEntry[]>(helper, 'fs:list', {
+          path: helperPaths.helperInstallDir,
+        })
+      : await this.listRemoteDirectory(profile, runtime, helperPaths.helperInstallDir);
+
+    const helperDirectories: RemoteDirectoryEntry[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory || !isVersionDirectoryName(entry.name)) {
+        continue;
+      }
+      const helperFilePath = normalizeRemotePath(`${entry.path}/${HELPER_FILENAME}`);
+      const helperFileExists = helper
+        ? await this.callHelper<boolean>(helper, 'fs:exists', {
+            path: helperFilePath,
+          })
+        : await this.remoteFileExists(profile, runtime, helperFilePath);
+      if (!helperFileExists) {
+        continue;
+      }
+      helperDirectories.push({
+        name: entry.name,
+        path: normalizeRemotePath(entry.path),
+        isDirectory: true,
+      });
+    }
+
+    return helperDirectories;
+  }
+
+  private async deleteHelperDirectory(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    directoryPath: string,
+    helper?: HelperProcess
+  ): Promise<void> {
+    if (helper) {
+      await this.callHelper(helper, 'fs:delete', {
+        path: directoryPath,
+        recursive: true,
+      });
+      return;
+    }
+
+    await this.deleteRemotePath(profile, runtime, directoryPath);
+  }
+
+  private async listRemoteDirectory(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    dirPath: string
+  ): Promise<RemoteDirectoryEntry[]> {
+    const command =
+      runtime.platform === 'win32'
+        ? [
+            'powershell',
+            '-NoProfile',
+            '-Command',
+            [
+              `$dir = ${this.toPowerShellString(dirPath)}`,
+              'if (-not (Test-Path -LiteralPath $dir)) { Write-Output "[]"; exit 0 }',
+              '$entries = Get-ChildItem -LiteralPath $dir -Force | ForEach-Object {',
+              '  [PSCustomObject]@{',
+              '    name = $_.Name',
+              "    path = ($_.FullName -replace '\\\\', '/')",
+              '    isDirectory = $_.PSIsContainer',
+              '  }',
+              '}',
+              '$entries | ConvertTo-Json -Compress',
+            ].join('; '),
+          ]
+        : [
+            `node -e ${shellQuote(
+              [
+                "const fs = require('node:fs');",
+                `const dir = ${JSON.stringify(dirPath)};`,
+                "if (!fs.existsSync(dir)) { process.stdout.write('[]'); process.exit(0); }",
+                'const entries = fs.readdirSync(dir, { withFileTypes: true }).map((entry) => ({',
+                'name: entry.name,',
+                "path: [dir.replace(/\\/+$/, ''), entry.name].join('/').replace(/\\\\/g, '/'),",
+                'isDirectory: entry.isDirectory(),',
+                '}));',
+                'process.stdout.write(JSON.stringify(entries));',
+              ].join(' ')
+            )}`,
+          ];
+
+    const output = await this.execSsh(profile, command, runtime.resolvedHost);
+    const trimmed = output.trim();
+    if (!trimmed) {
+      return [];
+    }
+    const parsed = JSON.parse(trimmed) as RemoteDirectoryEntry | RemoteDirectoryEntry[];
+    return (Array.isArray(parsed) ? parsed : [parsed]).map((entry) => ({
+      ...entry,
+      path: normalizeRemotePath(entry.path),
+    }));
+  }
+
+  private async remoteFileExists(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    targetPath: string
+  ): Promise<boolean> {
+    const command =
+      runtime.platform === 'win32'
+        ? [
+            'powershell',
+            '-NoProfile',
+            '-Command',
+            `if (Test-Path -LiteralPath ${this.toPowerShellString(targetPath)} -PathType Leaf) { Write-Output true } else { Write-Output false }`,
+          ]
+        : [
+            `node -e ${shellQuote(
+              [
+                "const fs = require('node:fs');",
+                `const target = ${JSON.stringify(targetPath)};`,
+                "try { process.stdout.write(String(fs.statSync(target).isFile())); } catch { process.stdout.write('false'); }",
+              ].join(' ')
+            )}`,
+          ];
+    const output = await this.execSsh(profile, command, runtime.resolvedHost);
+    return output.trim() === 'true';
+  }
+
+  private async deleteRemotePath(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    targetPath: string
+  ): Promise<void> {
+    const command =
+      runtime.platform === 'win32'
+        ? [
+            'powershell',
+            '-NoProfile',
+            '-Command',
+            `if (Test-Path -LiteralPath ${this.toPowerShellString(targetPath)}) { Remove-Item -LiteralPath ${this.toPowerShellString(targetPath)} -Recurse -Force }`,
+          ]
+        : [`rm -rf ${shellQuote(targetPath)}`];
+    await this.execSsh(profile, command, runtime.resolvedHost);
+  }
+
+  private toPowerShellString(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
   }
 
   private async resolveRuntime(
