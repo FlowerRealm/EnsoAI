@@ -50,6 +50,9 @@
       this.resetMenuCommandId = null;
       this.shortcutMenuId = null;
       this.dragOffset = { x: 0, y: 0 };
+      this.boundInspectorMove = this.handleInspectorMove.bind(this);
+      this.boundInspectorClick = this.handleInspectorClick.bind(this);
+      this.boundGlobalKeyDown = this.handleGlobalKeyDown.bind(this);
 
       this.init();
     }
@@ -246,6 +249,7 @@
 
     destroyUI() {
       if (this.isActive) this.toggleMode();
+      document.removeEventListener('keydown', this.boundGlobalKeyDown, true);
       Object.values(this.elements).forEach((el) => {
         el?.remove();
       });
@@ -307,20 +311,7 @@
         if (!this.isDragging) this.toggleMode();
       });
 
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && this.isActive) this.toggleMode();
-        const shortcuts = this.getShortcuts();
-        if (this.matchShortcut(e, shortcuts.toggle)) {
-          e.preventDefault();
-          e.stopPropagation();
-          this.toggleMode();
-        }
-        if (this.matchShortcut(e, shortcuts.reset)) {
-          e.preventDefault();
-          e.stopPropagation();
-          this.resetPosition();
-        }
-      });
+      document.addEventListener('keydown', this.boundGlobalKeyDown, true);
     }
 
     resetPosition() {
@@ -485,16 +476,31 @@
         btn.classList.add('active');
         btn.innerHTML = CONFIG.ICONS.CLOSE;
         document.body.style.cursor = 'crosshair';
-        document.addEventListener('mousemove', this.handleInspectorMove.bind(this), true);
-        document.addEventListener('click', this.handleInspectorClick.bind(this), true);
+        document.addEventListener('mousemove', this.boundInspectorMove, true);
+        document.addEventListener('click', this.boundInspectorClick, true);
       } else {
         btn.classList.remove('active');
         btn.innerHTML = CONFIG.ICONS.TARGET;
         document.body.style.cursor = '';
         overlay.style.display = 'none';
         label.style.display = 'none';
-        document.removeEventListener('mousemove', this.handleInspectorMove.bind(this), true);
-        document.removeEventListener('click', this.handleInspectorClick.bind(this), true);
+        document.removeEventListener('mousemove', this.boundInspectorMove, true);
+        document.removeEventListener('click', this.boundInspectorClick, true);
+      }
+    }
+
+    handleGlobalKeyDown(e) {
+      if (e.key === 'Escape' && this.isActive) this.toggleMode();
+      const shortcuts = this.getShortcuts();
+      if (this.matchShortcut(e, shortcuts.toggle)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.toggleMode();
+      }
+      if (this.matchShortcut(e, shortcuts.reset)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.resetPosition();
       }
     }
 
