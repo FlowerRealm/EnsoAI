@@ -1,3 +1,10 @@
+export type AppCloseRequestReason = 'quit-app' | 'replace-window';
+
+export interface AppCloseRequestPayload {
+  requestId: string;
+  reason: AppCloseRequestReason;
+}
+
 export const IPC_CHANNELS = {
   // Git
   GIT_STATUS: 'git:status',
@@ -131,6 +138,7 @@ export const IPC_CHANNELS = {
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: 'window:setTrafficLightsVisible',
   WINDOW_IS_FULLSCREEN: 'window:isFullScreen',
   WINDOW_FULLSCREEN_CHANGED: 'window:fullScreenChanged',
+  WINDOW_GET_CONTEXT: 'window:getContext',
 
   // Dialog
   DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
@@ -144,6 +152,12 @@ export const IPC_CHANNELS = {
   REMOTE_CONNECT: 'remote:connect',
   REMOTE_DISCONNECT: 'remote:disconnect',
   REMOTE_GET_STATUS: 'remote:getStatus',
+  REMOTE_SESSION_OPEN: 'remote:session:open',
+  REMOTE_SESSION_CLOSE: 'remote:session:close',
+  REMOTE_SESSION_GET: 'remote:session:get',
+  REMOTE_SESSION_SYNC_LOCAL_STORAGE: 'remote:session:syncLocalStorage',
+  REMOTE_SESSION_CONSUME_RESTORE: 'remote:session:consumeRestore',
+  REMOTE_DIRECTORY_LIST: 'remote:directory:list',
   REMOTE_HELPER_STATUS: 'remote:helper:status',
   REMOTE_HELPER_INSTALL: 'remote:helper:install',
   REMOTE_HELPER_UPDATE: 'remote:helper:update',

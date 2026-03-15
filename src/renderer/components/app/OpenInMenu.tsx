@@ -40,6 +40,7 @@ export function OpenInMenu({ path, activeTab }: OpenInMenuProps) {
   const openWith = useOpenWith();
   const [lastUsedApp, setLastUsedApp] = useState<string>('');
   const { activeTabPath, tabs, currentCursorLine } = useEditorStore();
+  const isRemotePath = path?.startsWith('/__enso_remote__/') ?? false;
 
   useEffect(() => {
     const saved = localStorage.getItem('enso-last-opened-app');
@@ -95,11 +96,11 @@ export function OpenInMenu({ path, activeTab }: OpenInMenuProps) {
     );
   }
 
-  if (!path) {
+  if (!path || isRemotePath) {
     return (
       <div className="flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-sm opacity-50">
         <FolderOpen className="h-3.5 w-3.5" />
-        <span>Quick Open</span>
+        <span>{isRemotePath ? 'Remote Only' : 'Quick Open'}</span>
       </div>
     );
   }

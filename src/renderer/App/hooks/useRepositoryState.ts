@@ -1,4 +1,4 @@
-import { getPathBasename } from '@shared/utils/path';
+import { getDisplayPathBasename } from '@shared/utils/path';
 import { buildRepositoryId } from '@shared/utils/workspace';
 import { useCallback, useEffect, useState } from 'react';
 import { normalizeHexColor } from '@/lib/colors';
@@ -48,7 +48,7 @@ export function useRepositoryState() {
           }
           if (repo.name.includes('/') || repo.name.includes('\\')) {
             needsMigration = true;
-            return { ...withId, name: getPathBasename(repo.path) };
+            return { ...withId, name: getDisplayPathBasename(repo.path) };
           }
           if (withId.groupId && !validGroupIds.has(withId.groupId)) {
             needsMigration = true;
@@ -185,7 +185,7 @@ export function useRepositoryState() {
         return;
       }
 
-      const name = getPathBasename(path);
+      const name = getDisplayPathBasename(path);
       const newRepo: Repository = {
         id,
         name,

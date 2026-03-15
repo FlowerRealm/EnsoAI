@@ -1,6 +1,7 @@
-export const REMOTE_HELPER_VERSION = '0.1.0';
+export const REMOTE_SERVER_VERSION = '0.2.0';
+export const REMOTE_HELPER_VERSION = REMOTE_SERVER_VERSION;
 
-export function getRemoteHelperSource(): string {
+export function getRemoteServerSource(): string {
   return String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -11,6 +12,36 @@ const { spawn } = require('node:child_process');
 const state = {
   watchers: new Map(),
 };
+
+let fatalExitHandled = false;
+
+function formatFatalError(error) {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+  return String(error);
+}
+
+function writeFatalError(error) {
+  const text = formatFatalError(error).trim();
+  if (!text) return;
+  process.stderr.write(text.endsWith('\n') ? text : text + '\n');
+}
+
+function exitWithFatalError(error) {
+  if (fatalExitHandled) return;
+  fatalExitHandled = true;
+  writeFatalError(error);
+  process.exit(1);
+}
+
+process.on('uncaughtException', (error) => {
+  exitWithFatalError(error);
+});
+
+process.on('unhandledRejection', (error) => {
+  exitWithFatalError(error);
+});
 
 function send(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
@@ -57,7 +88,7 @@ function execCommand(command, args, options = {}) {
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        reject(new Error(stderr.trim() || stdout.trim() || \`\${command} 已退出，退出码 \${code}\`));
+        reject(new Error(stderr.trim() || stdout.trim() || (command + ' 已退出，退出码 ' + code)));
       }
     });
   });
@@ -153,14 +184,32 @@ async function fileExists(filePath) {
 }
 
 async function testEnvironment() {
-  const git = await execCommand('git', ['--version']);
-  const nodeVersion = process.version;
+  let gitVersion = null;
+  try {
+    const git = await execCommand('git', ['--version']);
+    gitVersion = git.stdout.trim() || git.stderr.trim() || null;
+  } catch {
+    gitVersion = null;
+  }
+
   return {
     platform: process.platform,
     homeDir: normalize(os.homedir()),
-    nodeVersion,
-    gitVersion: git.stdout.trim(),
+    nodeVersion: process.version,
+    gitVersion,
   };
+}
+
+async function runSelfTest() {
+  const env = await testEnvironment();
+  process.stdout.write(
+    JSON.stringify({
+      ok: true,
+      platform: env.platform,
+      nodeVersion: env.nodeVersion,
+      homeDir: env.homeDir,
+    }) + '\n'
+  );
 }
 
 function parsePorcelainStatus(stdout) {
@@ -387,6 +436,15 @@ async function gitStatus(rootPath) {
   return parsePorcelainStatus(stdout);
 }
 
+async function gitResolveRoot(rootPath) {
+  try {
+    const { stdout } = await execCommand('git', ['rev-parse', '--show-toplevel'], { cwd: rootPath });
+    return normalize(stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
 async function gitBranches(rootPath) {
   const { stdout } = await execCommand('git', ['branch', '-a', '-v'], { cwd: rootPath });
   return parseBranches(stdout);
@@ -407,9 +465,9 @@ async function gitCheckout(rootPath, branch) {
 }
 
 async function gitLog(rootPath, maxCount = 50, skip = 0) {
-  const args = ['log', \`-n\${maxCount}\`, '--pretty=format:%H%x01%ai%x01%an%x01%ae%x01%s%x01%D'];
+  const args = ['log', '-n' + maxCount, '--pretty=format:%H%x01%ai%x01%an%x01%ae%x01%s%x01%D'];
   if (skip > 0) {
-    args.push(\`--skip=\${skip}\`);
+    args.push('--skip=' + skip);
   }
   const { stdout } = await execCommand('git', args, { cwd: rootPath });
   return parseLog(stdout);
@@ -472,7 +530,7 @@ async function gitFileChanges(rootPath) {
 }
 
 async function gitFileDiff(rootPath, filePath, staged) {
-  const args = staged ? ['show', \`HEAD:\${filePath}\`] : ['show', \`HEAD:\${filePath}\`];
+  const args = staged ? ['show', 'HEAD:' + filePath] : ['show', 'HEAD:' + filePath];
   let original = '';
   try {
     const result = await execCommand('git', args, { cwd: rootPath });
@@ -663,6 +721,7 @@ const handlers = {
   'fs:watchStart': ({ id, path }) => watchStart(id, path),
   'fs:watchStop': ({ id }) => watchStop(id),
   'git:status': ({ rootPath }) => gitStatus(rootPath),
+  'git:resolveRoot': ({ rootPath }) => gitResolveRoot(rootPath),
   'git:branches': ({ rootPath }) => gitBranches(rootPath),
   'git:branchCreate': ({ rootPath, name, startPoint }) => gitBranchCreate(rootPath, name, startPoint),
   'git:checkout': ({ rootPath, branch }) => gitCheckout(rootPath, branch),
@@ -698,37 +757,58 @@ const handlers = {
   }) => searchContent(rootPath, query, maxResults, caseSensitive, wholeWord, regex, filePattern, useGitignore),
 };
 
-let buffer = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  buffer += chunk;
-  const lines = buffer.split('\n');
-  buffer = lines.pop() || '';
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch (error) {
-      send({ type: 'parse-error', error: error instanceof Error ? error.message : String(error) });
-      continue;
+function startStdioServer() {
+  let buffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch (error) {
+        send({ type: 'parse-error', error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      const handler = handlers[message.method];
+      if (!handler) {
+        replyError(message.id, new Error('不支持的 server 方法: ' + message.method));
+        continue;
+      }
+      Promise.resolve(handler(message.params || {}))
+        .then((result) => reply(message.id, result))
+        .catch((error) => replyError(message.id, error));
     }
-    const handler = handlers[message.method];
-    if (!handler) {
-      replyError(message.id, new Error('不支持的 helper 方法: ' + message.method));
-      continue;
-    }
-    Promise.resolve(handler(message.params || {}))
-      .then((result) => reply(message.id, result))
-      .catch((error) => replyError(message.id, error));
-  }
-});
+  });
 
-process.stdin.on('end', () => {
-  for (const watcher of state.watchers.values()) {
-    watcher.close();
+  process.stdin.on('end', () => {
+    for (const watcher of state.watchers.values()) {
+      watcher.close();
+    }
+    state.watchers.clear();
+  });
+}
+
+async function main() {
+  if (process.argv.includes('--self-test')) {
+    await runSelfTest();
+    return;
   }
-  state.watchers.clear();
+
+  if (!process.argv.includes('--stdio')) {
+    throw new Error('不支持的远程服务模式');
+  }
+
+  startStdioServer();
+}
+
+main().catch((error) => {
+  exitWithFatalError(error);
 });
 `;
 }
+
+export const getRemoteHelperSource = getRemoteServerSource;

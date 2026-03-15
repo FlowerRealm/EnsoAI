@@ -48,6 +48,9 @@ interface MainContentProps {
   onTabReorder?: (fromIndex: number, toIndex: number) => void;
   repoPath?: string; // repository path for session storage
   worktreePath?: string;
+  sourceControlRootPath?: string;
+  reviewRootPath?: string;
+  openInPath?: string;
   repositoryCollapsed?: boolean;
   worktreeCollapsed?: boolean;
   fileSidebarCollapsed?: boolean;
@@ -62,6 +65,9 @@ interface MainContentProps {
   onCategoryChange?: (category: SettingsCategory) => void;
   scrollToProvider?: boolean;
   onToggleSettings?: () => void;
+  showOpenInMenu?: boolean;
+  sourceControlEmptyTitle?: string;
+  sourceControlEmptyDescription?: string;
 }
 
 export function MainContent({
@@ -71,6 +77,9 @@ export function MainContent({
   onTabReorder,
   repoPath,
   worktreePath,
+  sourceControlRootPath,
+  reviewRootPath,
+  openInPath,
   repositoryCollapsed = false,
   worktreeCollapsed = false,
   fileSidebarCollapsed = false,
@@ -85,6 +94,9 @@ export function MainContent({
   onCategoryChange,
   scrollToProvider,
   onToggleSettings,
+  showOpenInMenu = true,
+  sourceControlEmptyTitle,
+  sourceControlEmptyDescription,
 }: MainContentProps) {
   const { t } = useI18n();
   const settingsDisplayMode = useSettingsStore((s) => s.settingsDisplayMode);
@@ -242,6 +254,9 @@ export function MainContent({
 
   // Check if we have a currently selected worktree
   const hasActiveWorktree = Boolean(repoPath && worktreePath);
+  const effectiveSourceControlRootPath = sourceControlRootPath ?? worktreePath;
+  const effectiveReviewRootPath = reviewRootPath ?? worktreePath;
+  const effectiveOpenInPath = openInPath ?? worktreePath;
 
   // When background image is enabled, avoid stacking multiple semi-transparent bg-background layers
   // Keep bg-background on <main> only (1 layer), remove from all inner elements to prevent double-stacking
@@ -404,7 +419,7 @@ export function MainContent({
           >
             <Settings className="h-4 w-4" />
           </button>
-          {activeSessionId && (
+          {activeSessionId && effectiveReviewRootPath && (
             <Button
               variant="outline"
               size="sm"
@@ -415,7 +430,7 @@ export function MainContent({
               {t('Review')}
             </Button>
           )}
-          <OpenInMenu path={worktreePath} activeTab={activeTab} />
+          {showOpenInMenu && <OpenInMenu path={effectiveOpenInPath} activeTab={activeTab} />}
         </div>
       </header>
 
@@ -522,10 +537,12 @@ export function MainContent({
           )}
         >
           <SourceControlPanel
-            rootPath={worktreePath}
+            rootPath={effectiveSourceControlRootPath}
             isActive={activeTab === 'source-control'}
             onExpandWorktree={onExpandWorktree}
             worktreeCollapsed={worktreeCollapsed}
+            emptyTitle={sourceControlEmptyTitle}
+            emptyDescription={sourceControlEmptyDescription}
           />
         </div>
         {/* Todo tab */}
@@ -583,7 +600,7 @@ export function MainContent({
       <DiffReviewModal
         open={isReviewModalOpen}
         onOpenChange={setIsReviewModalOpen}
-        rootPath={worktreePath}
+        rootPath={effectiveReviewRootPath}
         onSend={() => onTabChange('chat')}
       />
     </main>

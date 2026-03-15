@@ -4,11 +4,16 @@ import type { Repository } from '../constants';
 import { ensureRepositoryId, pathsEqual } from '../storage';
 
 export function useOpenPathListener(
+  enabled: boolean,
   repositories: Repository[],
   saveRepositories: (repos: Repository[]) => void,
   setSelectedRepo: (repo: string) => void
 ) {
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     const cleanup = window.electronAPI.app.onOpenPath((rawPath) => {
       const path = rawPath.replace(/[\\/]+$/, '').replace(/^["']|["']$/g, '');
       const existingRepo = repositories.find((r) => pathsEqual(r.path, path));
@@ -27,5 +32,5 @@ export function useOpenPathListener(
       }
     });
     return cleanup;
-  }, [repositories, saveRepositories, setSelectedRepo]);
+  }, [enabled, repositories, saveRepositories, setSelectedRepo]);
 }

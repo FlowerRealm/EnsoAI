@@ -1,24 +1,48 @@
-import type { ClaudeProvider } from '@shared/types';
+import type { ClaudeProvider, ClaudeSettings } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { type BrowserWindow, ipcMain } from 'electron';
 import {
   applyProvider,
+  applyProviderToClaudeSettings,
+  extractProviderFromClaudeSettings,
   extractProviderFromSettings,
   readClaudeSettings,
   unwatchClaudeSettings,
   watchClaudeSettings,
 } from '../services/claude/ClaudeProviderManager';
+import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
 
 export function registerClaudeProviderHandlers(): void {
   // 读取当前 Claude settings
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_READ_SETTINGS, () => {
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_READ_SETTINGS, async (event) => {
+    if (remoteSessionManager.hasSession(event.sender)) {
+      const settings = await remoteSessionManager.readRemoteJsonFile<ClaudeSettings>(
+        event.sender,
+        remoteSessionManager.getClaudeSettingsPath(event.sender)
+      );
+      const extracted = extractProviderFromClaudeSettings(settings);
+      return { settings, extracted };
+    }
+
     const settings = readClaudeSettings();
     const extracted = extractProviderFromSettings();
     return { settings, extracted };
   });
 
   // 应用 Provider 配置
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_APPLY, (_, provider: ClaudeProvider) => {
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_APPLY, async (event, provider: ClaudeProvider) => {
+    if (remoteSessionManager.hasSession(event.sender)) {
+      const settings =
+        (await remoteSessionManager.readRemoteJsonFile<ClaudeSettings>(
+          event.sender,
+          remoteSessionManager.getClaudeSettingsPath(event.sender)
+        )) ?? {};
+      return remoteSessionManager.writeRemoteJsonFile(
+        event.sender,
+        remoteSessionManager.getClaudeSettingsPath(event.sender),
+        applyProviderToClaudeSettings(settings, provider)
+      );
+    }
     return applyProvider(provider);
   });
 }

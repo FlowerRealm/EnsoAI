@@ -4,19 +4,29 @@ import { join } from 'node:path';
 import type {
   ConnectionProfile,
   ConnectionTestResult,
+  FileEntry,
+  RemoteArchitecture,
   RemoteAuthResponse,
+  RemoteConnectionPhase,
   RemoteConnectionStatus,
   RemoteHelperStatus,
   RemoteHostFingerprint,
   RemotePlatform,
+  RemoteRuntimeStatus,
 } from '@shared/types';
 import { app } from 'electron';
 import { getEnvForCommand } from '../../utils/shell';
 import { RemoteAuthBroker } from './RemoteAuthBroker';
-import { getRemoteHelperSource, REMOTE_HELPER_VERSION } from './RemoteHelperSource';
-import { createRemoteError, translateRemote } from './RemoteI18n';
+import { getRemoteServerSource, REMOTE_SERVER_VERSION } from './RemoteHelperSource';
+import { createRemoteError, getRemoteErrorDetail, translateRemote } from './RemoteI18n';
+import {
+  ensureRemoteRuntimeAsset,
+  MANAGED_REMOTE_NODE_VERSION,
+  MANAGED_REMOTE_RUNTIME_DIR,
+  type RemoteRuntimeAsset,
+} from './RemoteRuntimeAssets';
 
-interface HelperProcess {
+interface RemoteServerProcess {
   connectionId: string;
   profile: ConnectionProfile;
   proc: import('node:child_process').ChildProcessWithoutNullStreams;
@@ -31,6 +41,8 @@ interface HelperProcess {
   buffer: string;
   closed: boolean;
   status: RemoteConnectionStatus;
+  stderrTail: string[];
+  stdoutNoiseTail: string[];
 }
 
 interface ResolvedHostConfig {
@@ -43,9 +55,9 @@ interface ResolvedHostConfig {
 
 interface ConnectionRuntime {
   platform: RemotePlatform;
+  arch: RemoteArchitecture;
   homeDir: string;
-  nodeVersion: string;
-  gitVersion: string;
+  gitVersion?: string;
   resolvedHost: ResolvedHostConfig;
 }
 
@@ -60,17 +72,35 @@ interface LocalCommandResult {
   code: number | null;
 }
 
-interface HelperInstallPaths {
-  helperInstallDir: string;
-  helperDir: string;
-  helperPath: string;
-}
-
-interface HelperEnvironmentInfo {
+export interface RemoteConnectionRuntimeInfo {
+  profile: ConnectionProfile;
+  sshTarget: string;
   platform: RemotePlatform;
   homeDir: string;
   nodeVersion: string;
-  gitVersion: string;
+  gitVersion?: string;
+  resolvedHost: {
+    host: string;
+    port: number;
+  };
+}
+
+interface RuntimeInstallPaths {
+  installDir: string;
+  versionDir: string;
+  incomingDir: string;
+  archivePath: string;
+  runtimeRootDir: string;
+  serverPath: string;
+  nodePath: string;
+}
+
+interface RemoteEnvironmentInfo {
+  platform: RemotePlatform;
+  arch?: RemoteArchitecture;
+  homeDir: string;
+  nodeVersion: string;
+  gitVersion?: string | null;
 }
 
 interface RemoteDirectoryEntry {
@@ -81,19 +111,48 @@ interface RemoteDirectoryEntry {
 
 type RemoteEventListener = (payload: unknown) => void;
 
-const DEFAULT_HELPER_DIR = '.ensoai/remote-helper';
-const HELPER_FILENAME = 'enso-remote-helper.cjs';
-const HELPER_BOOTSTRAP_TIMEOUT_MS = 5_000;
+const DEFAULT_RUNTIME_DIR = MANAGED_REMOTE_RUNTIME_DIR;
+const SERVER_FILENAME = 'enso-remote-server.cjs';
+const BOOTSTRAP_TIMEOUT_MS = 5_000;
 const REMOTE_SETTINGS_PATH = 'remote-connections.json';
 const REMOTE_KNOWN_HOSTS_PATH = 'remote-known_hosts';
 const SSH_KEYSCAN_TIMEOUT_SECONDS = 5;
+const MAX_REMOTE_DIAGNOSTIC_LINES = 40;
+const MAX_REMOTE_DIAGNOSTIC_CHARS = 8_192;
 
-function now() {
+type RemoteServerLaunchMode = 'stdio' | 'self-test';
+
+function now(): number {
   return Date.now();
 }
 
 function normalizeLineEndings(input: string): string {
   return input.replace(/\r\n/g, '\n');
+}
+
+function stripHashbang(input: string): string {
+  return input.replace(/^#!.*\r?\n/, '');
+}
+
+function splitDiagnosticChunk(input: string): string[] {
+  return normalizeLineEndings(input)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function appendDiagnosticLines(target: string[], chunk: string): void {
+  for (const line of splitDiagnosticChunk(chunk)) {
+    target.push(line);
+  }
+
+  while (target.length > MAX_REMOTE_DIAGNOSTIC_LINES) {
+    target.shift();
+  }
+
+  while (target.length > 1 && target.join('\n').length > MAX_REMOTE_DIAGNOSTIC_CHARS) {
+    target.shift();
+  }
 }
 
 function normalizeRemotePath(input: string): string {
@@ -131,14 +190,6 @@ function getRemoteStateRoot(): string {
 
 function getAppKnownHostsPath(): string {
   return join(getRemoteStateRoot(), REMOTE_KNOWN_HOSTS_PATH);
-}
-
-function buildPosixNodeWriteCommand(targetPath: string, content: string): string {
-  const source = [
-    "const fs = require('node:fs');",
-    `fs.writeFileSync(${JSON.stringify(targetPath)}, Buffer.from(${JSON.stringify(content)}, 'base64'));`,
-  ].join(' ');
-  return `node -e ${shellQuote(source)}`;
 }
 
 function expandHomePath(input: string): string {
@@ -250,6 +301,33 @@ function isAuthenticationFailure(detail: string): boolean {
   );
 }
 
+function phaseLabelFor(phase: RemoteConnectionPhase | undefined): string | undefined {
+  switch (phase) {
+    case 'probing-host':
+      return translateRemote('Checking SSH host...');
+    case 'resolving-platform':
+      return translateRemote('Resolving remote platform...');
+    case 'preparing-runtime':
+      return translateRemote('Preparing managed remote runtime...');
+    case 'uploading-runtime':
+      return translateRemote('Uploading managed remote runtime...');
+    case 'extracting-runtime':
+      return translateRemote('Extracting managed remote runtime...');
+    case 'syncing-server':
+      return translateRemote('Syncing remote server files...');
+    case 'starting-server':
+      return translateRemote('Starting remote server...');
+    case 'handshake':
+      return translateRemote('Waiting for remote server handshake...');
+    case 'connected':
+      return translateRemote('Connected');
+    case 'failed':
+      return translateRemote('Connection failed');
+    default:
+      return undefined;
+  }
+}
+
 async function runLocalCommand(
   command: string,
   args: string[],
@@ -279,9 +357,10 @@ async function runLocalCommand(
 
 export class RemoteConnectionManager {
   private profiles = new Map<string, ConnectionProfile>();
-  private helpers = new Map<string, HelperProcess>();
+  private servers = new Map<string, RemoteServerProcess>();
   private pendingConnections = new Map<string, Promise<RemoteConnectionStatus>>();
   private runtimes = new Map<string, ConnectionRuntime>();
+  private volatileStatuses = new Map<string, RemoteConnectionStatus>();
   private readonly authBroker = new RemoteAuthBroker();
   private loaded = false;
 
@@ -289,6 +368,7 @@ export class RemoteConnectionManager {
     if (this.loaded) {
       return this.listProfiles();
     }
+
     const path = getRemoteSettingsPath();
     if (await pathExists(path)) {
       try {
@@ -301,6 +381,7 @@ export class RemoteConnectionManager {
         console.warn('[remote] Failed to read profiles:', error);
       }
     }
+
     this.loaded = true;
     return this.listProfiles();
   }
@@ -319,11 +400,14 @@ export class RemoteConnectionManager {
       id: input.id ?? randomUUID(),
       name: input.name.trim(),
       sshTarget: input.sshTarget.trim(),
+      runtimeInstallDir:
+        input.runtimeInstallDir?.trim() || input.helperInstallDir?.trim() || undefined,
       helperInstallDir: input.helperInstallDir?.trim() || undefined,
       platformHint: input.platformHint,
       createdAt: existing?.createdAt ?? input.createdAt ?? now(),
       updatedAt: now(),
     };
+
     this.profiles.set(profile.id, profile);
     this.runtimes.delete(profile.id);
     this.authBroker.clearSecrets(profile.id);
@@ -336,15 +420,19 @@ export class RemoteConnectionManager {
     await this.disconnect(profileId).catch(() => {});
     this.profiles.delete(profileId);
     this.runtimes.delete(profileId);
+    this.volatileStatuses.delete(profileId);
     this.authBroker.clearSecrets(profileId);
     await this.flush();
   }
 
   getStatus(connectionId: string): RemoteConnectionStatus {
     return (
-      this.helpers.get(connectionId)?.status ?? {
+      this.servers.get(connectionId)?.status ??
+      this.volatileStatuses.get(connectionId) ?? {
         connectionId,
         connected: false,
+        phase: 'idle',
+        lastCheckedAt: now(),
       }
     );
   }
@@ -356,8 +444,9 @@ export class RemoteConnectionManager {
       return {
         success: true,
         platform: runtime.platform,
+        arch: runtime.arch,
         homeDir: runtime.homeDir,
-        nodeVersion: runtime.nodeVersion,
+        nodeVersion: MANAGED_REMOTE_NODE_VERSION,
         gitVersion: runtime.gitVersion,
       };
     } catch (error) {
@@ -368,37 +457,50 @@ export class RemoteConnectionManager {
     }
   }
 
-  async getHelperStatus(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+  async getRuntimeStatus(profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> {
     const profile = await this.resolveProfile(profileOrId);
-    const connected = this.helpers.get(profile.id)?.status.connected ?? false;
+    const connected = this.servers.get(profile.id)?.status.connected ?? false;
 
     try {
       const runtime = await this.resolveRuntime(profile, false);
-      const helperPaths = this.getHelperInstallPaths(profile, runtime);
-      const installedVersions = await this.listInstalledHelperVersions(
-        profile,
-        runtime,
-        helperPaths
-      );
+      const paths = this.getRuntimeInstallPaths(profile, runtime);
+      const installedVersions = await this.listInstalledRuntimeVersions(profile, runtime, paths);
+      let error: string | undefined;
+      if (installedVersions.includes(REMOTE_SERVER_VERSION)) {
+        try {
+          await this.verifyManagedRuntime(profile, runtime, paths);
+        } catch (verificationError) {
+          error = getRemoteErrorDetail(verificationError);
+        }
+      }
+
       return {
         connectionId: profile.id,
         installed: installedVersions.length > 0,
-        installDir: helperPaths.helperInstallDir,
+        installDir: paths.installDir,
         installedVersions,
-        currentVersion: REMOTE_HELPER_VERSION,
+        currentVersion: REMOTE_SERVER_VERSION,
+        runtimeVersion: MANAGED_REMOTE_NODE_VERSION,
+        serverVersion: REMOTE_SERVER_VERSION,
         connected,
+        error,
         lastCheckedAt: now(),
       };
     } catch (error) {
-      const helperInstallDir = profile.helperInstallDir?.trim()
-        ? normalizeRemotePath(profile.helperInstallDir)
-        : DEFAULT_HELPER_DIR;
+      const installDir = profile.runtimeInstallDir?.trim()
+        ? normalizeRemotePath(profile.runtimeInstallDir)
+        : profile.helperInstallDir?.trim()
+          ? normalizeRemotePath(profile.helperInstallDir)
+          : DEFAULT_RUNTIME_DIR;
+
       return {
         connectionId: profile.id,
         installed: false,
-        installDir: helperInstallDir,
+        installDir,
         installedVersions: [],
-        currentVersion: REMOTE_HELPER_VERSION,
+        currentVersion: REMOTE_SERVER_VERSION,
+        runtimeVersion: MANAGED_REMOTE_NODE_VERSION,
+        serverVersion: REMOTE_SERVER_VERSION,
         connected,
         error: error instanceof Error ? error.message : String(error),
         lastCheckedAt: now(),
@@ -406,38 +508,54 @@ export class RemoteConnectionManager {
     }
   }
 
+  async getHelperStatus(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+    return this.getRuntimeStatus(profileOrId);
+  }
+
+  async installRuntime(profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> {
+    const profile = await this.resolveProfile(profileOrId);
+    const runtime = await this.resolveRuntime(profile, false);
+    const paths = this.getRuntimeInstallPaths(profile, runtime);
+    await this.installManagedRuntime(profile, runtime, paths);
+    return this.getRuntimeStatus(profile);
+  }
+
   async installHelperManually(
     profileOrId: string | ConnectionProfile
   ): Promise<RemoteHelperStatus> {
+    return this.installRuntime(profileOrId);
+  }
+
+  async updateRuntime(profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> {
     const profile = await this.resolveProfile(profileOrId);
+    await this.disconnect(profile.id).catch(() => {});
     const runtime = await this.resolveRuntime(profile, false);
-    const helperPaths = this.getHelperInstallPaths(profile, runtime);
-    await this.installHelper(profile, runtime, helperPaths);
-    return this.getHelperStatus(profile);
+    const paths = this.getRuntimeInstallPaths(profile, runtime);
+    await this.installManagedRuntime(profile, runtime, paths);
+    await this.cleanupOldRuntimeVersionsOnHost(profile, runtime, paths);
+    return this.getRuntimeStatus(profile);
   }
 
   async updateHelper(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
+    return this.updateRuntime(profileOrId);
+  }
+
+  async deleteRuntime(profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> {
     const profile = await this.resolveProfile(profileOrId);
     await this.disconnect(profile.id).catch(() => {});
     const runtime = await this.resolveRuntime(profile, false);
-    const helperPaths = this.getHelperInstallPaths(profile, runtime);
-    await this.installHelper(profile, runtime, helperPaths);
-    await this.cleanupOldHelperVersionsOnHost(profile, runtime, helperPaths);
-    return this.getHelperStatus(profile);
+    const paths = this.getRuntimeInstallPaths(profile, runtime);
+    await this.deleteInstalledRuntimeVersions(profile, runtime, paths);
+    return this.getRuntimeStatus(profile);
   }
 
   async deleteHelper(profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> {
-    const profile = await this.resolveProfile(profileOrId);
-    await this.disconnect(profile.id).catch(() => {});
-    const runtime = await this.resolveRuntime(profile, false);
-    const helperPaths = this.getHelperInstallPaths(profile, runtime);
-    await this.deleteInstalledHelperVersions(profile, runtime, helperPaths);
-    return this.getHelperStatus(profile);
+    return this.deleteRuntime(profileOrId);
   }
 
   async connect(profileOrId: string | ConnectionProfile): Promise<RemoteConnectionStatus> {
     const profile = await this.resolveProfile(profileOrId);
-    const existing = this.helpers.get(profile.id);
+    const existing = this.servers.get(profile.id);
     if (existing) {
       return existing.status;
     }
@@ -447,7 +565,7 @@ export class RemoteConnectionManager {
       return pending;
     }
 
-    const connectionAttempt = this.establishHelperConnection(profile).finally(() => {
+    const connectionAttempt = this.establishManagedRuntimeConnection(profile).finally(() => {
       if (this.pendingConnections.get(profile.id) === connectionAttempt) {
         this.pendingConnections.delete(profile.id);
       }
@@ -458,10 +576,10 @@ export class RemoteConnectionManager {
   }
 
   async disconnect(connectionId: string): Promise<void> {
-    const helper = this.helpers.get(connectionId);
-    if (!helper) return;
-    helper.proc.kill('SIGTERM');
-    this.helpers.delete(connectionId);
+    const server = this.servers.get(connectionId);
+    if (!server) return;
+    this.finalizeServerShutdown(server);
+    server.proc.kill('SIGTERM');
   }
 
   async browseRoots(profileOrId: string | ConnectionProfile): Promise<string[]> {
@@ -471,6 +589,17 @@ export class RemoteConnectionManager {
       return [runtime.homeDir.replace(/\\/g, '/')];
     }
     return ['/', runtime.homeDir.replace(/\\/g, '/')];
+  }
+
+  async listDirectory(
+    profileOrId: string | ConnectionProfile,
+    remotePath: string
+  ): Promise<FileEntry[]> {
+    const status = await this.connect(profileOrId);
+    const normalizedPath = normalizeRemotePath(remotePath);
+    return this.call<FileEntry[]>(status.connectionId, 'fs:list', {
+      path: normalizedPath,
+    });
   }
 
   async getTerminalSshOptions(
@@ -486,6 +615,25 @@ export class RemoteConnectionManager {
     };
   }
 
+  async getRuntimeInfo(
+    profileOrId: string | ConnectionProfile
+  ): Promise<RemoteConnectionRuntimeInfo> {
+    const profile = await this.resolveProfile(profileOrId);
+    const runtime = await this.resolveRuntime(profile, false);
+    return {
+      profile,
+      sshTarget: profile.sshTarget,
+      platform: runtime.platform,
+      homeDir: runtime.homeDir,
+      nodeVersion: MANAGED_REMOTE_NODE_VERSION,
+      gitVersion: runtime.gitVersion,
+      resolvedHost: {
+        host: runtime.resolvedHost.host,
+        port: runtime.resolvedHost.port,
+      },
+    };
+  }
+
   respondAuthPrompt(response: RemoteAuthResponse): boolean {
     return this.authBroker.respond(response);
   }
@@ -495,8 +643,8 @@ export class RemoteConnectionManager {
     method: string,
     params: Record<string, unknown>
   ): Promise<T> {
-    const helper = this.helpers.get(connectionId) ?? (await this.ensureConnected(connectionId));
-    return this.callHelper<T>(helper, method, params);
+    const server = this.servers.get(connectionId) ?? (await this.ensureConnected(connectionId));
+    return this.callServer<T>(server, method, params);
   }
 
   async addEventListener(
@@ -504,155 +652,434 @@ export class RemoteConnectionManager {
     event: string,
     listener: RemoteEventListener
   ): Promise<() => void> {
-    const helper = this.helpers.get(connectionId) ?? (await this.ensureConnected(connectionId));
-    helper.proc.on(event, listener);
+    const server = this.servers.get(connectionId) ?? (await this.ensureConnected(connectionId));
+    server.proc.on(event, listener);
     return () => {
-      helper.proc.off(event, listener);
+      server.proc.off(event, listener);
     };
   }
 
   async cleanup(): Promise<void> {
-    const ids = [...this.helpers.keys()];
+    const ids = [...this.servers.keys()];
     await Promise.allSettled(ids.map((id) => this.disconnect(id)));
     await this.authBroker.dispose();
   }
 
-  private async ensureConnected(connectionId: string): Promise<HelperProcess> {
+  private setStatus(
+    connectionId: string,
+    updater: (current: RemoteConnectionStatus) => RemoteConnectionStatus
+  ): RemoteConnectionStatus {
+    const current = this.getStatus(connectionId);
+    const next = {
+      ...updater(current),
+      connectionId,
+      lastCheckedAt: now(),
+    };
+
+    const server = this.servers.get(connectionId);
+    if (server) {
+      server.status = next;
+    } else {
+      this.volatileStatuses.set(connectionId, next);
+    }
+
+    return next;
+  }
+
+  private async ensureConnected(connectionId: string): Promise<RemoteServerProcess> {
     await this.connect(connectionId);
-    const helper = this.helpers.get(connectionId);
-    if (!helper) {
-      throw createRemoteError('Failed to establish remote helper for {{connectionId}}', {
+    const server = this.servers.get(connectionId);
+    if (!server) {
+      throw createRemoteError('Failed to establish remote server for {{connectionId}}', {
         connectionId,
       });
     }
-    return helper;
+    return server;
   }
 
-  private async establishHelperConnection(
+  private async establishManagedRuntimeConnection(
     profile: ConnectionProfile
   ): Promise<RemoteConnectionStatus> {
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      connected: false,
+      phase: 'probing-host',
+      phaseLabel: phaseLabelFor('probing-host'),
+      error: undefined,
+      runtimeVersion: MANAGED_REMOTE_NODE_VERSION,
+      serverVersion: REMOTE_SERVER_VERSION,
+      helperVersion: REMOTE_SERVER_VERSION,
+    }));
+
     const runtime = await this.resolveRuntime(profile, false);
-    const helperPaths = this.getHelperInstallPaths(profile, runtime);
+    const paths = this.getRuntimeInstallPaths(profile, runtime);
 
     try {
-      return await this.startConnectedHelper(profile, runtime, helperPaths);
+      await this.verifyManagedRuntime(profile, runtime, paths);
+      return await this.startConnectedServer(profile, runtime, paths);
     } catch (reuseError) {
       const detail = reuseError instanceof Error ? reuseError.message : String(reuseError);
       console.warn(
-        `[remote:${profile.name}] Failed to reuse helper, reinstalling current version: ${detail}`
+        `[remote:${profile.name}] Failed to reuse remote runtime server, reinstalling: ${detail}`
       );
     }
 
-    await this.installHelper(profile, runtime, helperPaths);
-    return this.startConnectedHelper(profile, runtime, helperPaths);
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'preparing-runtime',
+      phaseLabel: phaseLabelFor('preparing-runtime'),
+      platform: runtime.platform,
+      arch: runtime.arch,
+    }));
+
+    await this.installManagedRuntime(profile, runtime, paths);
+    await this.verifyManagedRuntime(profile, runtime, paths);
+    return this.startConnectedServer(profile, runtime, paths);
   }
 
-  private getHelperInstallPaths(
+  private getRuntimeInstallPaths(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime
-  ): HelperInstallPaths {
-    const helperInstallDir = normalizeRemotePath(
-      profile.helperInstallDir?.trim() ||
-        `${runtime.homeDir.replace(/\\/g, '/')}/${DEFAULT_HELPER_DIR}`
+  ): RuntimeInstallPaths {
+    const installDir = normalizeRemotePath(
+      profile.runtimeInstallDir?.trim() ||
+        profile.helperInstallDir?.trim() ||
+        `${runtime.homeDir.replace(/\\/g, '/')}/${DEFAULT_RUNTIME_DIR}`
     );
-    const helperDir = normalizeRemotePath(`${helperInstallDir}/${REMOTE_HELPER_VERSION}`);
+
+    const versionDir = normalizeRemotePath(`${installDir}/${REMOTE_SERVER_VERSION}`);
+    const incomingDir = normalizeRemotePath(`${installDir}/incoming`);
+    const archivePath = normalizeRemotePath(
+      `${incomingDir}/runtime.${runtime.platform === 'win32' ? 'zip' : 'tar.gz'}`
+    );
+    const runtimeRootDir = normalizeRemotePath(`${versionDir}/runtime`);
+    const nodeFolder =
+      runtime.platform === 'win32'
+        ? `node-v${MANAGED_REMOTE_NODE_VERSION}-win-${runtime.arch}`
+        : `node-v${MANAGED_REMOTE_NODE_VERSION}-${runtime.platform}-${runtime.arch}`;
+    const nodePath =
+      runtime.platform === 'win32'
+        ? normalizeRemotePath(`${runtimeRootDir}/${nodeFolder}/node.exe`)
+        : normalizeRemotePath(`${runtimeRootDir}/${nodeFolder}/bin/node`);
+
     return {
-      helperInstallDir,
-      helperDir,
-      helperPath: normalizeRemotePath(`${helperDir}/${HELPER_FILENAME}`),
+      installDir,
+      versionDir,
+      incomingDir,
+      archivePath,
+      runtimeRootDir,
+      serverPath: normalizeRemotePath(`${versionDir}/${SERVER_FILENAME}`),
+      nodePath,
     };
   }
 
-  private async installHelper(
+  private async installManagedRuntime(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths
+    paths: RuntimeInstallPaths
   ): Promise<void> {
+    const runtimeAsset = await ensureRemoteRuntimeAsset(runtime.platform, runtime.arch);
+
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'uploading-runtime',
+      phaseLabel: phaseLabelFor('uploading-runtime'),
+      platform: runtime.platform,
+      arch: runtime.arch,
+    }));
+
     await this.execSsh(
       profile,
       [
         runtime.platform === 'win32'
-          ? `powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '${helperPaths.helperDir.replace(/'/g, "''")}' | Out-Null"`
-          : `mkdir -p ${shellQuote(helperPaths.helperDir)}`,
+          ? [
+              `$paths = @(${this.toPowerShellString(paths.installDir)}, ${this.toPowerShellString(
+                paths.versionDir
+              )}, ${this.toPowerShellString(paths.incomingDir)}, ${this.toPowerShellString(
+                paths.runtimeRootDir
+              )})`,
+              'foreach ($path in $paths) { New-Item -ItemType Directory -Force -Path $path | Out-Null }',
+            ].join('; ')
+          : `mkdir -p ${shellQuote(paths.installDir)} ${shellQuote(paths.versionDir)} ${shellQuote(paths.incomingDir)} ${shellQuote(paths.runtimeRootDir)}`,
       ],
       runtime.resolvedHost
     );
 
-    const helperSource = normalizeLineEndings(getRemoteHelperSource());
-    const encoded = Buffer.from(helperSource, 'utf8').toString('base64');
-    const writeCommand =
+    await this.uploadFileOverScp(
+      profile,
+      runtimeAsset.localPath,
+      paths.archivePath,
+      runtime.resolvedHost
+    );
+
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'extracting-runtime',
+      phaseLabel: phaseLabelFor('extracting-runtime'),
+    }));
+
+    await this.extractManagedRuntime(profile, runtime, paths, runtimeAsset.asset);
+
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'syncing-server',
+      phaseLabel: phaseLabelFor('syncing-server'),
+    }));
+
+    await this.syncRemoteServerSource(profile, runtime, paths.serverPath);
+  }
+
+  private async extractManagedRuntime(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    paths: RuntimeInstallPaths,
+    asset: RemoteRuntimeAsset
+  ): Promise<void> {
+    const command =
       runtime.platform === 'win32'
         ? [
             'powershell',
             '-NoProfile',
             '-Command',
-            `[IO.File]::WriteAllBytes('${helperPaths.helperPath.replace(/'/g, "''")}', [Convert]::FromBase64String('${encoded}'))`,
+            [
+              `if (Test-Path -LiteralPath ${this.toPowerShellString(paths.runtimeRootDir)}) { Remove-Item -LiteralPath ${this.toPowerShellString(paths.runtimeRootDir)} -Force -Recurse }`,
+              `New-Item -ItemType Directory -Force -Path ${this.toPowerShellString(paths.runtimeRootDir)} | Out-Null`,
+              `Expand-Archive -LiteralPath ${this.toPowerShellString(paths.archivePath)} -DestinationPath ${this.toPowerShellString(paths.runtimeRootDir)} -Force`,
+            ].join('; '),
           ]
-        : [buildPosixNodeWriteCommand(helperPaths.helperPath, encoded)];
-    await this.execSsh(profile, writeCommand, runtime.resolvedHost);
+        : [
+            `rm -rf ${shellQuote(paths.runtimeRootDir)} && mkdir -p ${shellQuote(paths.runtimeRootDir)} && tar -xzf ${shellQuote(paths.archivePath)} -C ${shellQuote(paths.runtimeRootDir)}`,
+          ];
+
+    await this.execSsh(profile, command, runtime.resolvedHost);
+
+    const nodeExists = await this.remoteFileExists(profile, runtime, paths.nodePath);
+    if (!nodeExists) {
+      throw new Error(
+        `Managed remote runtime node executable not found after extract: ${asset.archiveName}`
+      );
+    }
 
     if (runtime.platform !== 'win32') {
-      await this.execSsh(
-        profile,
-        [`chmod +x ${shellQuote(helperPaths.helperPath)}`],
-        runtime.resolvedHost
+      await this.execSsh(profile, [`chmod +x ${shellQuote(paths.nodePath)}`], runtime.resolvedHost);
+    }
+  }
+
+  private async syncRemoteServerSource(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    serverPath: string
+  ): Promise<void> {
+    const tempPath = join(
+      app.getPath('temp'),
+      `enso-remote-server-${profile.id}-${randomUUID()}.cjs`
+    );
+    const source = normalizeLineEndings(getRemoteServerSource());
+
+    try {
+      await this.validateRemoteServerSource(source);
+      await writeFile(tempPath, source, 'utf8');
+      await this.uploadFileOverScp(profile, tempPath, serverPath, runtime.resolvedHost);
+
+      if (runtime.platform !== 'win32') {
+        await this.execSsh(profile, [`chmod +x ${shellQuote(serverPath)}`], runtime.resolvedHost);
+      }
+    } finally {
+      await unlink(tempPath).catch(() => {});
+    }
+  }
+
+  private async validateRemoteServerSource(source: string): Promise<void> {
+    try {
+      const { Script } = await import('node:vm');
+      // Validate the generated CommonJS payload before we upload it to the remote host.
+      new Script(stripHashbang(source), { filename: SERVER_FILENAME });
+    } catch (error) {
+      throw createRemoteError('Generated remote server source is invalid', undefined, error);
+    }
+  }
+
+  private buildRemoteNodeCommand(
+    runtime: ConnectionRuntime,
+    paths: RuntimeInstallPaths,
+    args: string[]
+  ): string {
+    if (runtime.platform === 'win32') {
+      const nodePath = paths.nodePath.replace(/\//g, '\\');
+      const commandArgs = args.map((arg) => (arg.includes(' ') ? `"${arg}"` : arg)).join(' ');
+      return commandArgs ? `"${nodePath}" ${commandArgs}` : `"${nodePath}"`;
+    }
+
+    const quotedArgs = args.map((arg) => shellQuote(arg)).join(' ');
+    return quotedArgs ? `${shellQuote(paths.nodePath)} ${quotedArgs}` : shellQuote(paths.nodePath);
+  }
+
+  private buildRemoteServerCommand(
+    runtime: ConnectionRuntime,
+    paths: RuntimeInstallPaths,
+    mode: RemoteServerLaunchMode
+  ): string {
+    if (runtime.platform === 'win32') {
+      return `"${paths.nodePath.replace(/\//g, '\\')}" "${paths.serverPath.replace(/\//g, '\\')}" --${mode}`;
+    }
+
+    return `${shellQuote(paths.nodePath)} ${shellQuote(paths.serverPath)} --${mode}`;
+  }
+
+  private formatCommandResultDetail(result: LocalCommandResult): string | undefined {
+    const details = [result.stderr.trim(), result.stdout.trim()].filter(Boolean);
+    if (details.length > 0) {
+      return details.join('\n');
+    }
+
+    if (result.code !== null) {
+      return translateRemote('SSH command exited with code {{code}}', {
+        code: String(result.code),
+      });
+    }
+
+    return undefined;
+  }
+
+  private formatServerDiagnostics(server: RemoteServerProcess): string | undefined {
+    const sections: string[] = [];
+
+    if (server.stderrTail.length > 0) {
+      sections.push(`stderr:\n${server.stderrTail.join('\n')}`);
+    }
+
+    if (server.stdoutNoiseTail.length > 0) {
+      sections.push(`stdout:\n${server.stdoutNoiseTail.join('\n')}`);
+    }
+
+    return sections.join('\n\n') || undefined;
+  }
+
+  private buildServerFailureError(baseMessage: string, server: RemoteServerProcess): Error {
+    if (server.closed && server.status.error) {
+      return new Error(server.status.error);
+    }
+
+    const message = baseMessage.trim() || translateRemote('Remote server disconnected');
+    const diagnostics = this.formatServerDiagnostics(server);
+    if (!diagnostics || message.includes(diagnostics)) {
+      return new Error(message);
+    }
+
+    return createRemoteError(message, undefined, diagnostics);
+  }
+
+  private async verifyManagedRuntime(
+    profile: ConnectionProfile,
+    runtime: ConnectionRuntime,
+    paths: RuntimeInstallPaths
+  ): Promise<void> {
+    const checks = [
+      {
+        labelKey: 'Managed runtime node --version',
+        remoteCommand: [this.buildRemoteNodeCommand(runtime, paths, ['--version'])],
+      },
+      {
+        labelKey: 'Managed remote server self-test',
+        remoteCommand: [this.buildRemoteServerCommand(runtime, paths, 'self-test')],
+      },
+    ];
+
+    for (const check of checks) {
+      const result = await this.runSshCommand(profile, check.remoteCommand, runtime.resolvedHost);
+      if (result.code === 0) {
+        continue;
+      }
+
+      throw createRemoteError(
+        'Managed remote runtime verification failed during {{step}}',
+        {
+          step: translateRemote(check.labelKey),
+        },
+        this.formatCommandResultDetail(result)
       );
     }
   }
 
-  private async startConnectedHelper(
+  private async startConnectedServer(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths
+    paths: RuntimeInstallPaths
   ): Promise<RemoteConnectionStatus> {
-    const helper = await this.spawnHelperProcess(profile, runtime, helperPaths.helperPath);
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'starting-server',
+      phaseLabel: phaseLabelFor('starting-server'),
+      platform: runtime.platform,
+      arch: runtime.arch,
+      runtimeVersion: MANAGED_REMOTE_NODE_VERSION,
+      serverVersion: REMOTE_SERVER_VERSION,
+      helperVersion: REMOTE_SERVER_VERSION,
+    }));
+
+    const server = await this.spawnServerProcess(profile, runtime, paths);
     try {
-      const envInfo = await this.callHelper<HelperEnvironmentInfo>(
-        helper,
+      this.setStatus(profile.id, (current) => ({
+        ...current,
+        phase: 'handshake',
+        phaseLabel: phaseLabelFor('handshake'),
+      }));
+
+      const envInfo = await this.callServer<RemoteEnvironmentInfo>(
+        server,
         'env:test',
         {},
-        HELPER_BOOTSTRAP_TIMEOUT_MS
+        BOOTSTRAP_TIMEOUT_MS
       );
-      helper.status = {
-        ...helper.status,
+
+      server.status = {
+        ...server.status,
         connected: true,
+        phase: 'connected',
+        phaseLabel: phaseLabelFor('connected'),
         error: undefined,
         platform: envInfo.platform,
+        arch: envInfo.arch ?? runtime.arch,
+        runtimeVersion: envInfo.nodeVersion,
+        serverVersion: REMOTE_SERVER_VERSION,
+        helperVersion: REMOTE_SERVER_VERSION,
         lastCheckedAt: now(),
       };
-      this.helpers.set(profile.id, helper);
-      void this.cleanupOldHelperVersions(helper, helperPaths).catch((error) => {
+      this.servers.set(profile.id, server);
+      this.volatileStatuses.delete(profile.id);
+      void this.cleanupOldRuntimeVersions(server, paths).catch((error) => {
         console.warn(
-          `[remote:${profile.name}] Failed to clean up old helper versions: ${
+          `[remote:${profile.name}] Failed to clean up old remote runtime versions: ${
             error instanceof Error ? error.message : String(error)
           }`
         );
       });
-      return helper.status;
+      return server.status;
     } catch (error) {
-      helper.proc.kill('SIGTERM');
-      throw error;
+      const baseMessage =
+        getRemoteErrorDetail(error) || translateRemote('Failed to start remote server');
+      const failure = this.buildServerFailureError(baseMessage, server);
+      this.finalizeServerShutdown(server, failure);
+      server.proc.kill('SIGTERM');
+      throw failure;
     }
   }
 
-  private async spawnHelperProcess(
+  private async spawnServerProcess(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPath: string
-  ): Promise<HelperProcess> {
+    paths: RuntimeInstallPaths
+  ): Promise<RemoteServerProcess> {
     const { spawn } = await import('node:child_process');
-    const helperCommand =
-      runtime.platform === 'win32'
-        ? `node "${helperPath.replace(/\//g, '\\')}" --stdio`
-        : `node ${shellQuote(helperPath)} --stdio`;
+    const remoteCommand = this.buildRemoteServerCommand(runtime, paths, 'stdio');
     const sshContext = await this.buildSshContext(profile, runtime.resolvedHost);
-    const proc = spawn('ssh', [...sshContext.optionArgs, profile.sshTarget, helperCommand], {
+    const proc = spawn('ssh', [...sshContext.optionArgs, profile.sshTarget, remoteCommand], {
       env: sshContext.env,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    const helper: HelperProcess = {
+    const server: RemoteServerProcess = {
       connectionId: profile.id,
       profile,
       proc,
@@ -660,22 +1087,30 @@ export class RemoteConnectionManager {
       pending: new Map(),
       buffer: '',
       closed: false,
+      stderrTail: [],
+      stdoutNoiseTail: [],
       status: {
         connectionId: profile.id,
         connected: false,
-        helperVersion: REMOTE_HELPER_VERSION,
+        phase: 'starting-server',
+        phaseLabel: phaseLabelFor('starting-server'),
+        runtimeVersion: MANAGED_REMOTE_NODE_VERSION,
+        serverVersion: REMOTE_SERVER_VERSION,
+        helperVersion: REMOTE_SERVER_VERSION,
         platform: runtime.platform,
+        arch: runtime.arch,
         lastCheckedAt: now(),
       },
     };
 
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (chunk: string) => {
-      helper.buffer += chunk;
-      const lines = helper.buffer.split('\n');
-      helper.buffer = lines.pop() ?? '';
+      server.buffer += chunk;
+      const lines = server.buffer.split('\n');
+      server.buffer = lines.pop() ?? '';
       for (const line of lines) {
         if (!line.trim()) continue;
+
         let message: {
           type?: string;
           id?: number;
@@ -684,14 +1119,17 @@ export class RemoteConnectionManager {
           event?: string;
           payload?: unknown;
         };
+
         try {
           message = JSON.parse(line);
         } catch (error) {
-          console.warn('[remote] Failed to parse helper output:', error);
+          appendDiagnosticLines(server.stdoutNoiseTail, line);
+          console.warn('[remote] Failed to parse remote server output:', error);
           continue;
         }
+
         if (message.type === 'response' && typeof message.id === 'number') {
-          const pending = helper.pending.get(message.id);
+          const pending = server.pending.get(message.id);
           if (!pending) continue;
           if (message.error) {
             pending.reject(new Error(message.error));
@@ -699,70 +1137,83 @@ export class RemoteConnectionManager {
             pending.resolve(message.result);
           }
         } else if (message.type === 'event' && message.event) {
-          helper.proc.emit(`remote:${message.event}`, message.payload);
+          server.proc.emit(`remote:${message.event}`, message.payload);
         }
       }
     });
 
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', (chunk: string) => {
-      const text = chunk.trim();
-      if (!text) {
+      appendDiagnosticLines(server.stderrTail, chunk);
+      const lines = splitDiagnosticChunk(chunk);
+      if (lines.length === 0) {
         return;
       }
-      if (isAuthenticationFailure(text)) {
-        this.authBroker.clearSecrets(profile.id);
+      for (const line of lines) {
+        if (isAuthenticationFailure(line)) {
+          this.authBroker.clearSecrets(profile.id);
+        }
+        console.warn(`[remote:${profile.name}] ${line}`);
       }
-      console.warn(`[remote:${profile.name}] ${text}`);
     });
 
     proc.on('error', (error) => {
-      this.finalizeHelperShutdown(helper, error.message);
+      this.finalizeServerShutdown(server, this.buildServerFailureError(error.message, server));
     });
 
     proc.on('exit', (code, signal) => {
-      this.finalizeHelperShutdown(
-        helper,
+      this.finalizeServerShutdown(
+        server,
         code === 0
           ? undefined
-          : translateRemote('Remote helper exited ({{reason}})', {
-              reason: `${code ?? 'signal'}${signal ? `/${signal}` : ''}`,
-            })
+          : this.buildServerFailureError(
+              translateRemote('Remote server exited ({{reason}})', {
+                reason: `${code ?? 'signal'}${signal ? `/${signal}` : ''}`,
+              }),
+              server
+            )
       );
     });
 
-    return helper;
+    return server;
   }
 
-  private finalizeHelperShutdown(helper: HelperProcess, error?: string): void {
-    if (helper.closed) {
+  private finalizeServerShutdown(server: RemoteServerProcess, error?: unknown): void {
+    if (server.closed) {
       return;
     }
-    helper.closed = true;
-    helper.status = {
-      ...helper.status,
+
+    const detail = getRemoteErrorDetail(error);
+    server.closed = true;
+    server.status = {
+      ...server.status,
       connected: false,
-      error,
+      phase: detail ? 'failed' : 'idle',
+      phaseLabel: detail ? phaseLabelFor('failed') : phaseLabelFor('idle'),
+      error: detail,
       lastCheckedAt: now(),
     };
-    for (const pending of helper.pending.values()) {
+
+    for (const pending of server.pending.values()) {
       pending.reject(
-        new Error(helper.status.error || translateRemote('Remote helper disconnected'))
+        new Error(server.status.error || translateRemote('Remote server disconnected'))
       );
     }
-    helper.pending.clear();
-    if (this.helpers.get(helper.connectionId) === helper) {
-      this.helpers.delete(helper.connectionId);
+    server.pending.clear();
+
+    if (this.servers.get(server.connectionId) === server) {
+      this.servers.delete(server.connectionId);
     }
+    this.volatileStatuses.set(server.connectionId, server.status);
   }
 
-  private async callHelper<T = unknown>(
-    helper: HelperProcess,
+  private async callServer<T = unknown>(
+    server: RemoteServerProcess,
     method: string,
     params: Record<string, unknown>,
     timeoutMs?: number
   ): Promise<T> {
-    const id = helper.nextRequestId++;
+    const id = server.nextRequestId++;
     const payload = JSON.stringify({ id, method, params });
 
     return new Promise<T>((resolve, reject) => {
@@ -777,16 +1228,16 @@ export class RemoteConnectionManager {
         if (timeout) {
           clearTimeout(timeout);
         }
-        helper.pending.delete(id);
+        server.pending.delete(id);
         callback();
       };
 
-      helper.pending.set(id, {
+      server.pending.set(id, {
         resolve: (value) => finish(() => resolve(value as T)),
         reject: (error) => finish(() => reject(error)),
       });
 
-      helper.proc.stdin.write(`${payload}\n`, 'utf8', (error) => {
+      server.proc.stdin.write(`${payload}\n`, 'utf8', (error) => {
         if (error) {
           finish(() => reject(error));
         }
@@ -794,101 +1245,95 @@ export class RemoteConnectionManager {
 
       if (timeoutMs) {
         timeout = setTimeout(() => {
-          finish(() => reject(new Error(translateRemote('Remote helper bootstrap timed out'))));
+          finish(() => reject(new Error(translateRemote('Remote server bootstrap timed out'))));
         }, timeoutMs);
       }
     });
   }
 
-  private async cleanupOldHelperVersions(
-    helper: HelperProcess,
-    helperPaths: HelperInstallPaths
+  private async cleanupOldRuntimeVersions(
+    server: RemoteServerProcess,
+    paths: RuntimeInstallPaths
   ): Promise<void> {
-    const runtime = await this.resolveRuntime(helper.profile, false);
-    await this.cleanupOldHelperVersionsOnHost(helper.profile, runtime, helperPaths, helper);
+    const runtime = await this.resolveRuntime(server.profile, false);
+    await this.cleanupOldRuntimeVersionsOnHost(server.profile, runtime, paths, server);
   }
 
-  private async cleanupOldHelperVersionsOnHost(
+  private async cleanupOldRuntimeVersionsOnHost(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths,
-    helper?: HelperProcess
+    paths: RuntimeInstallPaths,
+    server?: RemoteServerProcess
   ): Promise<void> {
-    const entries = await this.listHelperDirectories(profile, runtime, helperPaths, helper);
-
+    const entries = await this.listRuntimeVersionDirectories(profile, runtime, paths, server);
     for (const entry of entries) {
-      if (entry.name === REMOTE_HELPER_VERSION) {
+      if (entry.name === REMOTE_SERVER_VERSION) {
         continue;
       }
-
-      await this.deleteHelperDirectory(profile, runtime, entry.path, helper);
+      await this.deleteRuntimeVersionDirectory(profile, runtime, entry.path, server);
     }
   }
 
-  private async listInstalledHelperVersions(
+  private async listInstalledRuntimeVersions(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths
+    paths: RuntimeInstallPaths
   ): Promise<string[]> {
-    const entries = await this.listHelperDirectories(profile, runtime, helperPaths);
+    const entries = await this.listRuntimeVersionDirectories(profile, runtime, paths);
     return entries.map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
   }
 
-  private async deleteInstalledHelperVersions(
+  private async deleteInstalledRuntimeVersions(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths
+    paths: RuntimeInstallPaths
   ): Promise<void> {
-    const entries = await this.listHelperDirectories(profile, runtime, helperPaths);
+    const entries = await this.listRuntimeVersionDirectories(profile, runtime, paths);
     for (const entry of entries) {
-      await this.deleteHelperDirectory(profile, runtime, entry.path);
+      await this.deleteRuntimeVersionDirectory(profile, runtime, entry.path);
     }
   }
 
-  private async listHelperDirectories(
+  private async listRuntimeVersionDirectories(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
-    helperPaths: HelperInstallPaths,
-    helper?: HelperProcess
+    paths: RuntimeInstallPaths,
+    server?: RemoteServerProcess
   ): Promise<RemoteDirectoryEntry[]> {
-    const entries = helper
-      ? await this.callHelper<RemoteDirectoryEntry[]>(helper, 'fs:list', {
-          path: helperPaths.helperInstallDir,
-        })
-      : await this.listRemoteDirectory(profile, runtime, helperPaths.helperInstallDir);
+    const entries = server
+      ? await this.callServer<RemoteDirectoryEntry[]>(server, 'fs:list', { path: paths.installDir })
+      : await this.listRemoteDirectory(profile, runtime, paths.installDir);
 
-    const helperDirectories: RemoteDirectoryEntry[] = [];
+    const runtimeDirectories: RemoteDirectoryEntry[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory || !isVersionDirectoryName(entry.name)) {
         continue;
       }
-      const helperFilePath = normalizeRemotePath(`${entry.path}/${HELPER_FILENAME}`);
-      const helperFileExists = helper
-        ? await this.callHelper<boolean>(helper, 'fs:exists', {
-            path: helperFilePath,
-          })
-        : await this.remoteFileExists(profile, runtime, helperFilePath);
-      if (!helperFileExists) {
+      const serverFilePath = normalizeRemotePath(`${entry.path}/${SERVER_FILENAME}`);
+      const serverFileExists = server
+        ? await this.callServer<boolean>(server, 'fs:exists', { path: serverFilePath })
+        : await this.remoteFileExists(profile, runtime, serverFilePath);
+      if (!serverFileExists) {
         continue;
       }
-      helperDirectories.push({
+      runtimeDirectories.push({
         name: entry.name,
         path: normalizeRemotePath(entry.path),
         isDirectory: true,
       });
     }
 
-    return helperDirectories;
+    return runtimeDirectories;
   }
 
-  private async deleteHelperDirectory(
+  private async deleteRuntimeVersionDirectory(
     profile: ConnectionProfile,
     runtime: ConnectionRuntime,
     directoryPath: string,
-    helper?: HelperProcess
+    server?: RemoteServerProcess
   ): Promise<void> {
-    if (helper) {
-      await this.callHelper(helper, 'fs:delete', {
+    if (server) {
+      await this.callServer(server, 'fs:delete', {
         path: directoryPath,
         recursive: true,
       });
@@ -923,19 +1368,18 @@ export class RemoteConnectionManager {
             ].join('; '),
           ]
         : [
-            `node -e ${shellQuote(
+            `sh -lc ${shellQuote(
               [
-                "const fs = require('node:fs');",
-                `const dir = ${JSON.stringify(dirPath)};`,
-                "if (!fs.existsSync(dir)) { process.stdout.write('[]'); process.exit(0); }",
-                'const entries = fs.readdirSync(dir, { withFileTypes: true }).map((entry) => ({',
-                'name: entry.name,',
-                "path: [dir.replace(/\\/+$/, ''), entry.name].join('/').replace(/\\\\/g, '/'),",
-                'isDirectory: entry.isDirectory(),',
-                '}));',
-                'process.stdout.write(JSON.stringify(entries));',
-              ].join(' ')
-            )}`,
+                'dir=$1',
+                '[ -d "$dir" ] || exit 0',
+                'for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do',
+                '  [ -e "$entry" ] || continue',
+                '  name=$(basename "$entry")',
+                '  if [ -d "$entry" ]; then is_directory=true; else is_directory=false; fi',
+                '  printf "%s\\t%s\\t%s\\n" "$name" "$entry" "$is_directory"',
+                'done',
+              ].join('; ')
+            )} sh ${shellQuote(dirPath)}`,
           ];
 
     const output = await this.execSsh(profile, command, runtime.resolvedHost);
@@ -943,11 +1387,27 @@ export class RemoteConnectionManager {
     if (!trimmed) {
       return [];
     }
-    const parsed = JSON.parse(trimmed) as RemoteDirectoryEntry | RemoteDirectoryEntry[];
-    return (Array.isArray(parsed) ? parsed : [parsed]).map((entry) => ({
-      ...entry,
-      path: normalizeRemotePath(entry.path),
-    }));
+
+    if (runtime.platform === 'win32') {
+      const parsed = JSON.parse(trimmed) as RemoteDirectoryEntry | RemoteDirectoryEntry[];
+      return (Array.isArray(parsed) ? parsed : [parsed]).map((entry) => ({
+        ...entry,
+        path: normalizeRemotePath(entry.path),
+      }));
+    }
+
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name = '', path = '', isDirectory = 'false'] = line.split('\t');
+        return {
+          name,
+          path: normalizeRemotePath(path),
+          isDirectory: isDirectory === 'true',
+        };
+      });
   }
 
   private async remoteFileExists(
@@ -963,15 +1423,7 @@ export class RemoteConnectionManager {
             '-Command',
             `if (Test-Path -LiteralPath ${this.toPowerShellString(targetPath)} -PathType Leaf) { Write-Output true } else { Write-Output false }`,
           ]
-        : [
-            `node -e ${shellQuote(
-              [
-                "const fs = require('node:fs');",
-                `const target = ${JSON.stringify(targetPath)};`,
-                "try { process.stdout.write(String(fs.statSync(target).isFile())); } catch { process.stdout.write('false'); }",
-              ].join(' ')
-            )}`,
-          ];
+        : [`test -f ${shellQuote(targetPath)} && printf true || printf false`];
     const output = await this.execSsh(profile, command, runtime.resolvedHost);
     return output.trim() === 'true';
   }
@@ -1006,30 +1458,81 @@ export class RemoteConnectionManager {
       return cached;
     }
 
+    this.setStatus(profile.id, (current) => ({
+      ...current,
+      phase: 'resolving-platform',
+      phaseLabel: phaseLabelFor('resolving-platform'),
+      connected: false,
+    }));
+
     const resolvedHost = await this.ensureHostTrusted(profile);
     const envInfoRaw = await this.execSsh(
       profile,
       [
-        'node -e "const os=require(\'os\'); console.log(JSON.stringify({platform:process.platform,homeDir:os.homedir(),nodeVersion:process.version}))"',
+        `sh -lc ${shellQuote(
+          [
+            'set +e',
+            "arch=$(uname -m 2>/dev/null || printf '')",
+            'home=$(printf %s "$HOME")',
+            'printf \'{"platform":"linux","arch":"%s","homeDir":"%s"}\' "$arch" "$home"',
+          ].join('; ')
+        )}`,
       ],
-      resolvedHost
-    );
+      resolvedHost,
+      false
+    ).catch(async () => {
+      return this.execSsh(
+        profile,
+        [
+          'powershell',
+          '-NoProfile',
+          '-Command',
+          [
+            "$arch = if ([Environment]::Is64BitOperatingSystem) { if ($env:PROCESSOR_ARCHITECTURE -match 'ARM') { 'arm64' } else { 'x64' } } else { 'x64' }",
+            '$homeDir = $HOME',
+            'Write-Output (\'{"platform":"win32","arch":"\' + $arch + \'","homeDir":"\' + (($homeDir -replace \'\\\\\', \'/\')) + \'"}\')',
+          ].join('; '),
+        ],
+        resolvedHost,
+        false
+      );
+    });
+
     const envInfo = JSON.parse(envInfoRaw.trim()) as {
       platform: RemotePlatform;
+      arch: string;
       homeDir: string;
-      nodeVersion: string;
     };
-    const gitVersion = await this.execSsh(profile, ['git --version'], resolvedHost);
 
     const runtime: ConnectionRuntime = {
       platform: envInfo.platform,
-      homeDir: envInfo.homeDir,
-      nodeVersion: envInfo.nodeVersion,
-      gitVersion: gitVersion.trim(),
+      arch: this.normalizeArchitecture(envInfo.arch),
+      homeDir: normalizeRemotePath(envInfo.homeDir),
+      gitVersion: (await this.getRemoteGitVersion(profile, resolvedHost)).trim() || undefined,
       resolvedHost,
     };
+
     this.runtimes.set(profile.id, runtime);
     return runtime;
+  }
+
+  private normalizeArchitecture(value: string | undefined): RemoteArchitecture {
+    const normalized = (value || '').toLowerCase();
+    if (normalized.includes('arm64') || normalized.includes('aarch64')) {
+      return 'arm64';
+    }
+    return 'x64';
+  }
+
+  private async getRemoteGitVersion(
+    profile: ConnectionProfile,
+    resolvedHost: ResolvedHostConfig
+  ): Promise<string> {
+    try {
+      return await this.execSsh(profile, ['git --version'], resolvedHost);
+    } catch {
+      return '';
+    }
   }
 
   private async ensureHostTrusted(profile: ConnectionProfile): Promise<ResolvedHostConfig> {
@@ -1085,8 +1588,8 @@ export class RemoteConnectionManager {
         connectionId: profile.id,
       });
     }
-    const knownHost = config.get('hostkeyalias')?.[0] || host;
 
+    const knownHost = config.get('hostkeyalias')?.[0] || host;
     return {
       host,
       port,
@@ -1121,6 +1624,7 @@ export class RemoteConnectionManager {
       app.getPath('temp'),
       `enso-remote-host-${host.replace(/[^a-z0-9_.-]/gi, '_')}-${port}-${randomUUID()}.keys`
     );
+
     try {
       await writeFile(tempPath, scannedKeys, 'utf8');
       const result = await runLocalCommand('ssh-keygen', ['-lf', tempPath]);
@@ -1153,6 +1657,7 @@ export class RemoteConnectionManager {
         LC_ALL: 'C',
       }
     );
+
     const scannedKeys = normalizeScannedKnownHostsEntries(
       result.stdout,
       config.knownHost,
@@ -1214,17 +1719,54 @@ export class RemoteConnectionManager {
     await writeFile(path, JSON.stringify(this.listProfiles(), null, 2), 'utf8');
   }
 
-  private async execSsh(
+  private async uploadFileOverScp(
+    profile: ConnectionProfile,
+    localPath: string,
+    remotePath: string,
+    resolvedHost: ResolvedHostConfig
+  ): Promise<void> {
+    const { spawn } = await import('node:child_process');
+    const sshContext = await this.buildSshContext(profile, resolvedHost);
+    const args = [...sshContext.optionArgs, localPath, `${profile.sshTarget}:${remotePath}`];
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('scp', args, {
+        env: sshContext.env,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(
+          new Error(stderr.trim() || stdout.trim() || `scp exited with code ${code ?? 'unknown'}`)
+        );
+      });
+    });
+  }
+
+  private async runSshCommand(
     profile: ConnectionProfile,
     remoteCommand: string[],
     resolvedHost: ResolvedHostConfig
-  ): Promise<string> {
+  ): Promise<LocalCommandResult> {
     const { spawn } = await import('node:child_process');
     const sshContext = await this.buildSshContext(profile, resolvedHost);
 
     return new Promise((resolve, reject) => {
-      const args = [...sshContext.optionArgs, profile.sshTarget, ...remoteCommand];
-      const child = spawn('ssh', args, {
+      const child = spawn('ssh', [...sshContext.optionArgs, profile.sshTarget, ...remoteCommand], {
         env: sshContext.env,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -1239,24 +1781,29 @@ export class RemoteConnectionManager {
       });
       child.on('error', reject);
       child.on('close', (code) => {
-        if (code === 0) {
-          resolve(stdout);
-          return;
-        }
-
-        const detail =
-          stderr.trim() ||
-          stdout.trim() ||
-          translateRemote('SSH command exited with code {{code}}', {
-            code: String(code ?? 'unknown'),
-          });
-        if (isAuthenticationFailure(detail)) {
+        const result = { stdout, stderr, code };
+        const detail = this.formatCommandResultDetail(result);
+        if (detail && isAuthenticationFailure(detail)) {
           this.authBroker.clearSecrets(profile.id);
           this.runtimes.delete(profile.id);
         }
-        reject(new Error(detail));
+        resolve(result);
       });
     });
+  }
+
+  private async execSsh(
+    profile: ConnectionProfile,
+    remoteCommand: string[],
+    resolvedHost: ResolvedHostConfig,
+    strictExit = true
+  ): Promise<string> {
+    const result = await this.runSshCommand(profile, remoteCommand, resolvedHost);
+    if (result.code === 0 || !strictExit) {
+      return result.stdout;
+    }
+
+    throw new Error(this.formatCommandResultDetail(result));
   }
 }
 

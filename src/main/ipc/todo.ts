@@ -1,5 +1,6 @@
 import { IPC_CHANNELS } from '@shared/types';
 import { ipcMain } from 'electron';
+import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
 import * as todoService from '../services/todo/TodoService';
 
 let readyPromise: Promise<void>;
@@ -14,7 +15,10 @@ export function registerTodoHandlers(): void {
     console.error('[Todo IPC] Failed to initialize TodoService:', err);
   });
 
-  ipcMain.handle(IPC_CHANNELS.TODO_GET_TASKS, async (_, repoPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.TODO_GET_TASKS, async (event, repoPath: string) => {
+    if (remoteSessionManager.hasSession(event.sender)) {
+      return remoteSessionManager.getTodoTasks(event.sender, repoPath);
+    }
     await ensureReady();
     return todoService.getTasks(repoPath);
   });
@@ -22,7 +26,7 @@ export function registerTodoHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.TODO_ADD_TASK,
     async (
-      _,
+      event,
       repoPath: string,
       task: {
         id: string;
@@ -35,6 +39,9 @@ export function registerTodoHandlers(): void {
         updatedAt: number;
       }
     ) => {
+      if (remoteSessionManager.hasSession(event.sender)) {
+        return remoteSessionManager.addTodoTask(event.sender, repoPath, task);
+      }
       await ensureReady();
       return todoService.addTask(repoPath, task);
     }
@@ -43,24 +50,39 @@ export function registerTodoHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.TODO_UPDATE_TASK,
     async (
-      _,
+      event,
       repoPath: string,
       taskId: string,
       updates: { title?: string; description?: string; priority?: string; status?: string }
     ) => {
+      if (remoteSessionManager.hasSession(event.sender)) {
+        return remoteSessionManager.updateTodoTask(event.sender, repoPath, taskId, updates);
+      }
       await ensureReady();
       return todoService.updateTask(repoPath, taskId, updates);
     }
   );
 
-  ipcMain.handle(IPC_CHANNELS.TODO_DELETE_TASK, async (_, repoPath: string, taskId: string) => {
+  ipcMain.handle(IPC_CHANNELS.TODO_DELETE_TASK, async (event, repoPath: string, taskId: string) => {
+    if (remoteSessionManager.hasSession(event.sender)) {
+      return remoteSessionManager.deleteTodoTask(event.sender, repoPath, taskId);
+    }
     await ensureReady();
     return todoService.deleteTask(repoPath, taskId);
   });
 
   ipcMain.handle(
     IPC_CHANNELS.TODO_MOVE_TASK,
-    async (_, repoPath: string, taskId: string, newStatus: string, newOrder: number) => {
+    async (event, repoPath: string, taskId: string, newStatus: string, newOrder: number) => {
+      if (remoteSessionManager.hasSession(event.sender)) {
+        return remoteSessionManager.moveTodoTask(
+          event.sender,
+          repoPath,
+          taskId,
+          newStatus,
+          newOrder
+        );
+      }
       await ensureReady();
       return todoService.moveTask(repoPath, taskId, newStatus, newOrder);
     }
@@ -68,7 +90,10 @@ export function registerTodoHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.TODO_REORDER_TASKS,
-    async (_, repoPath: string, status: string, orderedIds: string[]) => {
+    async (event, repoPath: string, status: string, orderedIds: string[]) => {
+      if (remoteSessionManager.hasSession(event.sender)) {
+        return remoteSessionManager.reorderTodoTasks(event.sender, repoPath, status, orderedIds);
+      }
       await ensureReady();
       return todoService.reorderTasks(repoPath, status, orderedIds);
     }

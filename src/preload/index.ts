@@ -4,6 +4,7 @@ import type { Locale } from '@shared/i18n';
 import type {
   AgentCliInfo,
   AgentMetadata,
+  AppCloseRequestPayload,
   CloneProgress,
   CloneResult,
   CommitFileChange,
@@ -40,6 +41,8 @@ import type {
   RemoteAuthResponse,
   RemoteConnectionStatus,
   RemoteHelperStatus,
+  RemoteRuntimeStatus,
+  RemoteWindowSession,
   ShellConfig,
   ShellInfo,
   TempWorkspaceCheckResult,
@@ -49,6 +52,7 @@ import type {
   TerminalResizeOptions,
   ValidateLocalPathResult,
   ValidateUrlResult,
+  WindowBootstrapContext,
   WorktreeCreateOptions,
   WorktreeMergeCleanupOptions,
   WorktreeMergeOptions,
@@ -59,6 +63,8 @@ import { IPC_CHANNELS } from '@shared/types';
 import type { InspectPayload, WebInspectorStatus } from '@shared/types/webInspector';
 import { contextBridge, ipcRenderer, shell, webUtils } from 'electron';
 import pkg from '../../package.json';
+
+const REMOTE_PATH_PREFIX = '/__enso_remote__';
 
 const electronAPI = {
   // Git
@@ -404,8 +410,8 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.APP_UPDATE_AVAILABLE, handler);
       return () => ipcRenderer.off(IPC_CHANNELS.APP_UPDATE_AVAILABLE, handler);
     },
-    onCloseRequest: (callback: (requestId: string) => void): (() => void) => {
-      const handler = (_: unknown, requestId: string) => callback(requestId);
+    onCloseRequest: (callback: (payload: AppCloseRequestPayload) => void): (() => void) => {
+      const handler = (_: unknown, payload: AppCloseRequestPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.APP_CLOSE_REQUEST, handler);
       return () => ipcRenderer.off(IPC_CHANNELS.APP_CLOSE_REQUEST, handler);
     },
@@ -473,6 +479,30 @@ const electronAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_DISCONNECT, connectionId),
     getStatus: (connectionId: string): Promise<RemoteConnectionStatus> =>
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_GET_STATUS, connectionId),
+    openSession: (payload: {
+      profileOrId: string | ConnectionProfile;
+      target: 'current-window' | 'new-window';
+    }): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_SESSION_OPEN, payload),
+    closeSession: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_SESSION_CLOSE),
+    getSession: (): Promise<{
+      session: RemoteWindowSession;
+      localStorage: Record<string, string>;
+    } | null> => ipcRenderer.invoke(IPC_CHANNELS.REMOTE_SESSION_GET),
+    syncSessionLocalStorage: (snapshot: Record<string, string>): Promise<boolean> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_SESSION_SYNC_LOCAL_STORAGE, snapshot),
+    listDirectory: (
+      profileOrId: string | ConnectionProfile,
+      remotePath: string
+    ): Promise<FileEntry[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_DIRECTORY_LIST, profileOrId, remotePath),
+    getRuntimeStatus: (profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_STATUS, profileOrId),
+    installRuntime: (profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_INSTALL, profileOrId),
+    updateRuntime: (profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_UPDATE, profileOrId),
+    deleteRuntime: (profileOrId: string | ConnectionProfile): Promise<RemoteRuntimeStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_DELETE, profileOrId),
     getHelperStatus: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
       ipcRenderer.invoke(IPC_CHANNELS.REMOTE_HELPER_STATUS, profileOrId),
     installHelper: (profileOrId: string | ConnectionProfile): Promise<RemoteHelperStatus> =>
@@ -516,7 +546,12 @@ const electronAPI = {
         openFiles?: string[];
         activeFile?: string;
       }
-    ): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_WITH, path, bundleId, options),
+    ): Promise<void> => {
+      if (path.startsWith(REMOTE_PATH_PREFIX)) {
+        return Promise.reject(new Error('Remote files cannot be opened with local applications'));
+      }
+      return ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_WITH, path, bundleId, options);
+    },
     getIcon: (bundleId: string): Promise<string | undefined> =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_GET_ICON, bundleId),
     getRecentProjects: (): Promise<RecentEditorProject[]> =>
@@ -608,7 +643,12 @@ const electronAPI = {
     resolveForCommand: (config: ShellConfig): Promise<{ shell: string; execArgs: string[] }> =>
       ipcRenderer.invoke(IPC_CHANNELS.SHELL_RESOLVE_FOR_COMMAND, config),
     openExternal: (url: string): Promise<void> => shell.openExternal(url),
-    openPath: (path: string): Promise<string> => shell.openPath(path),
+    openPath: (path: string): Promise<string> => {
+      if (path.startsWith(REMOTE_PATH_PREFIX)) {
+        return Promise.reject(new Error('Remote paths cannot be revealed locally'));
+      }
+      return shell.openPath(path);
+    },
   },
 
   // Menu actions from main process
@@ -645,6 +685,8 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, handler);
       return () => ipcRenderer.off(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, handler);
     },
+    getContext: (): Promise<WindowBootstrapContext> =>
+      ipcRenderer.invoke(IPC_CHANNELS.WINDOW_GET_CONTEXT),
   },
 
   // Notification

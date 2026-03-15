@@ -1,8 +1,8 @@
 import type {
   ConnectionProfile,
   ConnectionTestResult,
-  RemoteHelperStatus,
   RemotePlatform,
+  RemoteRuntimeStatus,
 } from '@shared/types';
 import {
   Download,
@@ -44,14 +44,14 @@ type PlatformSelectValue = '' | RemotePlatform;
 interface RemoteProfileFormState {
   name: string;
   sshTarget: string;
-  helperInstallDir: string;
+  runtimeInstallDir: string;
   platformHint: PlatformSelectValue;
 }
 
 const EMPTY_FORM: RemoteProfileFormState = {
   name: '',
   sshTarget: '',
-  helperInstallDir: '',
+  runtimeInstallDir: '',
   platformHint: '',
 };
 
@@ -80,10 +80,10 @@ export function RemoteSettings() {
     | 'save'
     | 'test'
     | 'delete'
-    | 'helper-status'
-    | 'helper-install'
-    | 'helper-update'
-    | 'helper-delete'
+    | 'runtime-status'
+    | 'runtime-install'
+    | 'runtime-update'
+    | 'runtime-delete'
     | null
   >(null);
   const [feedback, setFeedback] = React.useState<{
@@ -92,8 +92,8 @@ export function RemoteSettings() {
     description: string;
   } | null>(null);
   const [testResult, setTestResult] = React.useState<ConnectionTestResult | null>(null);
-  const [helperStatus, setHelperStatus] = React.useState<RemoteHelperStatus | null>(null);
-  const [deleteHelperDialogOpen, setDeleteHelperDialogOpen] = React.useState(false);
+  const [runtimeStatus, setRuntimeStatus] = React.useState<RemoteRuntimeStatus | null>(null);
+  const [deleteRuntimeDialogOpen, setDeleteRuntimeDialogOpen] = React.useState(false);
   const selectedProfile = profiles.find((item) => item.id === selectedProfileId);
 
   const syncFormFromProfile = React.useCallback((profile?: ConnectionProfile | null) => {
@@ -105,7 +105,7 @@ export function RemoteSettings() {
     setForm({
       name: profile.name,
       sshTarget: profile.sshTarget,
-      helperInstallDir: profile.helperInstallDir ?? '',
+      runtimeInstallDir: profile.runtimeInstallDir ?? profile.helperInstallDir ?? '',
       platformHint: profile.platformHint ?? '',
     });
   }, []);
@@ -140,30 +140,30 @@ export function RemoteSettings() {
     const profile = profiles.find((item) => item.id === selectedProfileId);
     syncFormFromProfile(profile);
     setTestResult(null);
-    setHelperStatus(null);
+    setRuntimeStatus(null);
   }, [profiles, selectedProfileId, syncFormFromProfile]);
 
-  const loadHelperStatus = React.useCallback(
+  const loadRuntimeStatus = React.useCallback(
     async (profileId: string, mode: 'refresh' | 'silent' = 'refresh') => {
       if (!profileId) {
-        setHelperStatus(null);
+        setRuntimeStatus(null);
         return null;
       }
 
       if (mode === 'refresh') {
-        setBusyAction('helper-status');
+        setBusyAction('runtime-status');
       }
 
       try {
-        const status = await window.electronAPI.remote.getHelperStatus(profileId);
-        setHelperStatus(status);
+        const status = await window.electronAPI.remote.getRuntimeStatus(profileId);
+        setRuntimeStatus(status);
         return status;
       } catch (error) {
-        setHelperStatus(null);
+        setRuntimeStatus(null);
         if (mode === 'refresh') {
           setFeedback({
             variant: 'error',
-            title: t('Failed to refresh helper status'),
+            title: t('Failed to refresh runtime status'),
             description: error instanceof Error ? error.message : t('Unknown error'),
           });
         }
@@ -179,11 +179,11 @@ export function RemoteSettings() {
 
   React.useEffect(() => {
     if (!selectedProfileId) {
-      setHelperStatus(null);
+      setRuntimeStatus(null);
       return;
     }
-    void loadHelperStatus(selectedProfileId, 'silent');
-  }, [loadHelperStatus, selectedProfileId]);
+    void loadRuntimeStatus(selectedProfileId, 'silent');
+  }, [loadRuntimeStatus, selectedProfileId]);
 
   const buildDraftProfile = React.useCallback((): ConnectionProfile => {
     const now = Date.now();
@@ -191,7 +191,8 @@ export function RemoteSettings() {
       id: selectedProfileId || 'draft-profile',
       name: form.name.trim(),
       sshTarget: form.sshTarget.trim(),
-      helperInstallDir: form.helperInstallDir.trim() || undefined,
+      runtimeInstallDir: form.runtimeInstallDir.trim() || undefined,
+      helperInstallDir: form.runtimeInstallDir.trim() || undefined,
       platformHint: form.platformHint || undefined,
       createdAt: now,
       updatedAt: now,
@@ -223,7 +224,8 @@ export function RemoteSettings() {
         id: selectedProfileId || undefined,
         name: form.name.trim(),
         sshTarget: form.sshTarget.trim(),
-        helperInstallDir: form.helperInstallDir.trim() || undefined,
+        runtimeInstallDir: form.runtimeInstallDir.trim() || undefined,
+        helperInstallDir: form.runtimeInstallDir.trim() || undefined,
         platformHint: form.platformHint || undefined,
       });
       upsertRemoteProfile(savedProfile);
@@ -231,10 +233,10 @@ export function RemoteSettings() {
       setFeedback({
         variant: 'success',
         title: t('Remote profile saved'),
-        description: t('You can now use it from Add Repository > SSH.'),
+        description: t('You can now use it from the Remote Host entry in the sidebar.'),
       });
       await loadProfiles();
-      await loadHelperStatus(savedProfile.id, 'silent');
+      await loadRuntimeStatus(savedProfile.id, 'silent');
     } catch (error) {
       setFeedback({
         variant: 'error',
@@ -244,7 +246,7 @@ export function RemoteSettings() {
     } finally {
       setBusyAction(null);
     }
-  }, [form, loadHelperStatus, loadProfiles, selectedProfileId, t, upsertRemoteProfile]);
+  }, [form, loadRuntimeStatus, loadProfiles, selectedProfileId, t, upsertRemoteProfile]);
 
   const handleDelete = React.useCallback(async () => {
     if (!selectedProfileId) return;
@@ -255,7 +257,7 @@ export function RemoteSettings() {
       setSelectedProfileId('');
       syncFormFromProfile(null);
       setTestResult(null);
-      setHelperStatus(null);
+      setRuntimeStatus(null);
       setFeedback({
         variant: 'success',
         title: t('Remote profile deleted'),
@@ -292,7 +294,7 @@ export function RemoteSettings() {
         setFeedback({
           variant: 'success',
           title: t('Connection succeeded'),
-          description: t('The remote host is reachable and ready for Enso remote helper setup.'),
+          description: t('The remote host is reachable and ready for managed runtime setup.'),
         });
       } else {
         setFeedback({
@@ -312,7 +314,7 @@ export function RemoteSettings() {
     }
   }, [buildDraftProfile, t]);
 
-  const runHelperAction = React.useCallback(
+  const runRuntimeAction = React.useCallback(
     async (
       action: 'install' | 'update' | 'delete',
       onSuccess: () => { title: string; description: string }
@@ -321,20 +323,20 @@ export function RemoteSettings() {
 
       setBusyAction(
         action === 'install'
-          ? 'helper-install'
+          ? 'runtime-install'
           : action === 'update'
-            ? 'helper-update'
-            : 'helper-delete'
+            ? 'runtime-update'
+            : 'runtime-delete'
       );
 
       try {
         const nextStatus =
           action === 'install'
-            ? await window.electronAPI.remote.installHelper(selectedProfileId)
+            ? await window.electronAPI.remote.installRuntime(selectedProfileId)
             : action === 'update'
-              ? await window.electronAPI.remote.updateHelper(selectedProfileId)
-              : await window.electronAPI.remote.deleteHelper(selectedProfileId);
-        setHelperStatus(nextStatus);
+              ? await window.electronAPI.remote.updateRuntime(selectedProfileId)
+              : await window.electronAPI.remote.deleteRuntime(selectedProfileId);
+        setRuntimeStatus(nextStatus);
         const message = onSuccess();
         setFeedback({
           variant: 'success',
@@ -346,10 +348,10 @@ export function RemoteSettings() {
           variant: 'error',
           title:
             action === 'install'
-              ? t('Failed to install helper')
+              ? t('Failed to install runtime')
               : action === 'update'
-                ? t('Failed to update helper')
-                : t('Failed to delete helper'),
+                ? t('Failed to update runtime')
+                : t('Failed to delete runtime'),
           description: error instanceof Error ? error.message : t('Unknown error'),
         });
       } finally {
@@ -359,27 +361,27 @@ export function RemoteSettings() {
     [selectedProfileId, t]
   );
 
-  const handleInstallHelper = React.useCallback(async () => {
-    await runHelperAction('install', () => ({
-      title: t('Helper installed'),
-      description: t('The current remote helper version is now installed.'),
+  const handleInstallRuntime = React.useCallback(async () => {
+    await runRuntimeAction('install', () => ({
+      title: t('Runtime installed'),
+      description: t('The managed remote runtime is now installed on this host.'),
     }));
-  }, [runHelperAction, t]);
+  }, [runRuntimeAction, t]);
 
-  const handleUpdateHelper = React.useCallback(async () => {
-    await runHelperAction('update', () => ({
-      title: t('Helper updated'),
-      description: t('The current remote helper version was reinstalled successfully.'),
+  const handleUpdateRuntime = React.useCallback(async () => {
+    await runRuntimeAction('update', () => ({
+      title: t('Runtime updated'),
+      description: t('The managed remote runtime was reinstalled successfully.'),
     }));
-  }, [runHelperAction, t]);
+  }, [runRuntimeAction, t]);
 
-  const handleDeleteHelper = React.useCallback(async () => {
-    setDeleteHelperDialogOpen(false);
-    await runHelperAction('delete', () => ({
-      title: t('Helper deleted'),
-      description: t('All installed helper versions for this profile were removed.'),
+  const handleDeleteRuntime = React.useCallback(async () => {
+    setDeleteRuntimeDialogOpen(false);
+    await runRuntimeAction('delete', () => ({
+      title: t('Runtime deleted'),
+      description: t('All installed managed runtime versions for this profile were removed.'),
     }));
-  }, [runHelperAction, t]);
+  }, [runRuntimeAction, t]);
 
   const environmentItems = React.useMemo(
     () =>
@@ -397,48 +399,50 @@ export function RemoteSettings() {
     [t, testResult]
   );
 
-  const helperInfoItems = React.useMemo(
+  const runtimeInfoItems = React.useMemo(
     () =>
-      helperStatus
+      runtimeStatus
         ? [
             {
               label: t('Status'),
-              value: helperStatus.installed ? t('Installed') : t('Not installed'),
+              value: runtimeStatus.installed ? t('Installed') : t('Not installed'),
             },
-            { label: t('Current version'), value: helperStatus.currentVersion },
-            { label: t('Install directory'), value: helperStatus.installDir },
+            { label: t('Current version'), value: runtimeStatus.currentVersion },
+            { label: t('Install directory'), value: runtimeStatus.installDir },
             {
               label: t('Installed versions'),
               value:
-                helperStatus.installedVersions.length > 0
-                  ? helperStatus.installedVersions.join(', ')
+                runtimeStatus.installedVersions.length > 0
+                  ? runtimeStatus.installedVersions.join(', ')
                   : '-',
             },
             {
               label: t('Connection'),
-              value: helperStatus.connected ? t('Connected') : t('Disconnected'),
+              value: runtimeStatus.connected ? t('Connected') : t('Disconnected'),
             },
           ]
         : [],
-    [helperStatus, t]
+    [runtimeStatus, t]
   );
 
-  const helperBusy =
-    busyAction === 'helper-status' ||
-    busyAction === 'helper-install' ||
-    busyAction === 'helper-update' ||
-    busyAction === 'helper-delete';
+  const runtimeBusy =
+    busyAction === 'runtime-status' ||
+    busyAction === 'runtime-install' ||
+    busyAction === 'runtime-update' ||
+    busyAction === 'runtime-delete';
   const hasSelectedProfile = Boolean(selectedProfileId);
-  const helperInstalled = helperStatus?.installed ?? false;
+  const runtimeInstalled = runtimeStatus?.installed ?? false;
   const currentVersionInstalled =
-    helperStatus?.installedVersions.includes(helperStatus.currentVersion) ?? false;
+    runtimeStatus?.installedVersions.includes(runtimeStatus.currentVersion) ?? false;
 
   return (
     <div className="space-y-6">
       <div className="space-y-2">
         <h2 className="font-semibold text-xl">{t('Remote Connection')}</h2>
         <p className="text-muted-foreground text-sm">
-          {t('Save SSH profiles here, then add a remote workspace from the Add Repository dialog.')}
+          {t(
+            'Save SSH profiles here, then use the Remote Host entry in the sidebar to open a full remote window.'
+          )}
         </p>
       </div>
 
@@ -490,7 +494,7 @@ export function RemoteSettings() {
                   syncFormFromProfile(null);
                   setFeedback(null);
                   setTestResult(null);
-                  setHelperStatus(null);
+                  setRuntimeStatus(null);
                 }}
               >
                 <Server className="h-4 w-4 shrink-0" />
@@ -540,13 +544,13 @@ export function RemoteSettings() {
             </Field>
 
             <Field className="min-w-0">
-              <FieldLabel>{t('Helper install directory')}</FieldLabel>
+              <FieldLabel>{t('Runtime install directory')}</FieldLabel>
               <Input
-                value={form.helperInstallDir}
+                value={form.runtimeInstallDir}
                 onChange={(event) =>
-                  setForm((current) => ({ ...current, helperInstallDir: event.target.value }))
+                  setForm((current) => ({ ...current, runtimeInstallDir: event.target.value }))
                 }
-                placeholder={t('Optional override, for example ~/.ensoai/remote-helper')}
+                placeholder={t('Optional override, for example ~/.ensoai/remote-runtime')}
               />
             </Field>
 
@@ -622,9 +626,11 @@ export function RemoteSettings() {
 
       <Card>
         <CardHeader className="border-b">
-          <CardTitle>{t('Remote Helper')}</CardTitle>
+          <CardTitle>{t('Managed Remote Runtime')}</CardTitle>
           <CardDescription>
-            {t('Install, refresh, update, or remove the helper on the selected remote host.')}
+            {t(
+              'Install, refresh, update, or remove the managed runtime on the selected remote host.'
+            )}
           </CardDescription>
         </CardHeader>
         <CardPanel className="space-y-6">
@@ -632,23 +638,23 @@ export function RemoteSettings() {
             <Alert variant="info">
               <AlertTitle>{t('Select a profile')}</AlertTitle>
               <AlertDescription>
-                {t('Choose a saved SSH profile above before managing the remote helper.')}
+                {t('Choose a saved SSH profile above before managing the remote runtime.')}
               </AlertDescription>
             </Alert>
           ) : (
             <>
-              {helperStatus?.error && (
+              {runtimeStatus?.error && (
                 <Alert variant="error">
-                  <AlertTitle>{t('Failed to refresh helper status')}</AlertTitle>
-                  <AlertDescription>{helperStatus.error}</AlertDescription>
+                  <AlertTitle>{t('Failed to refresh runtime status')}</AlertTitle>
+                  <AlertDescription>{runtimeStatus.error}</AlertDescription>
                 </Alert>
               )}
 
-              {helperStatus && (
+              {runtimeStatus && (
                 <Alert variant="info">
-                  <AlertTitle>{t('Helper status')}</AlertTitle>
+                  <AlertTitle>{t('Runtime status')}</AlertTitle>
                   <AlertDescription className="grid gap-3 sm:grid-cols-2">
-                    {helperInfoItems.map((item) => (
+                    {runtimeInfoItems.map((item) => (
                       <div
                         key={item.label}
                         className="min-w-0 rounded-lg bg-background/70 px-3 py-2"
@@ -668,10 +674,10 @@ export function RemoteSettings() {
                   type="button"
                   variant="outline"
                   className="w-full justify-center"
-                  onClick={() => void loadHelperStatus(selectedProfileId)}
-                  disabled={!hasSelectedProfile || helperBusy}
+                  onClick={() => void loadRuntimeStatus(selectedProfileId)}
+                  disabled={!hasSelectedProfile || runtimeBusy}
                 >
-                  {busyAction === 'helper-status' ? (
+                  {busyAction === 'runtime-status' ? (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
                     <RefreshCw className="h-4 w-4 shrink-0" />
@@ -683,10 +689,10 @@ export function RemoteSettings() {
                   type="button"
                   variant="outline"
                   className="w-full justify-center"
-                  onClick={() => void handleInstallHelper()}
-                  disabled={!hasSelectedProfile || helperBusy || currentVersionInstalled}
+                  onClick={() => void handleInstallRuntime()}
+                  disabled={!hasSelectedProfile || runtimeBusy || currentVersionInstalled}
                 >
-                  {busyAction === 'helper-install' ? (
+                  {busyAction === 'runtime-install' ? (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
                     <Download className="h-4 w-4 shrink-0" />
@@ -698,10 +704,10 @@ export function RemoteSettings() {
                   type="button"
                   variant="outline"
                   className="w-full justify-center"
-                  onClick={() => void handleUpdateHelper()}
-                  disabled={!hasSelectedProfile || helperBusy || !helperInstalled}
+                  onClick={() => void handleUpdateRuntime()}
+                  disabled={!hasSelectedProfile || runtimeBusy || !runtimeInstalled}
                 >
-                  {busyAction === 'helper-update' ? (
+                  {busyAction === 'runtime-update' ? (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
                     <RotateCw className="h-4 w-4 shrink-0" />
@@ -713,15 +719,15 @@ export function RemoteSettings() {
                   type="button"
                   variant="destructive-outline"
                   className="w-full justify-center"
-                  onClick={() => setDeleteHelperDialogOpen(true)}
-                  disabled={!hasSelectedProfile || helperBusy || !helperInstalled}
+                  onClick={() => setDeleteRuntimeDialogOpen(true)}
+                  disabled={!hasSelectedProfile || runtimeBusy || !runtimeInstalled}
                 >
-                  {busyAction === 'helper-delete' ? (
+                  {busyAction === 'runtime-delete' ? (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
                     <Trash2 className="h-4 w-4 shrink-0" />
                   )}
-                  <span>{t('Delete helper')}</span>
+                  <span>{t('Delete runtime')}</span>
                 </Button>
               </div>
             </>
@@ -752,18 +758,18 @@ export function RemoteSettings() {
         </Alert>
       )}
 
-      <AlertDialog open={deleteHelperDialogOpen} onOpenChange={setDeleteHelperDialogOpen}>
+      <AlertDialog open={deleteRuntimeDialogOpen} onOpenChange={setDeleteRuntimeDialogOpen}>
         <AlertDialogPopup className="max-w-md">
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('Delete remote helper?')}</AlertDialogTitle>
+            <AlertDialogTitle>{t('Delete managed remote runtime?')}</AlertDialogTitle>
             <AlertDialogDescription>
-              {t('This will remove all installed helper versions for this SSH profile.')}
+              {t('This will remove all installed managed runtime versions for this SSH profile.')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline">{t('Cancel')}</Button>} />
-            <Button variant="destructive" onClick={() => void handleDeleteHelper()}>
-              {t('Delete helper')}
+            <Button variant="destructive" onClick={() => void handleDeleteRuntime()}>
+              {t('Delete runtime')}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

@@ -1,4 +1,5 @@
-import { isWslUncPath, trimTrailingPathSeparators } from '@shared/utils/path';
+import type { RemoteWindowSession } from '@shared/types';
+import { getDisplayPath, isWslUncPath } from '@shared/utils/path';
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import {
   ChevronRight,
@@ -48,6 +49,7 @@ import { useI18n } from '@/i18n';
 import { heightVariants, springFast, springStandard } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
+import { RemoteHostSidebarCard } from '../remote/RemoteHostSidebarCard';
 import { RunningProjectsPopover } from './RunningProjectsPopover';
 
 interface Repository {
@@ -81,6 +83,10 @@ interface RepositorySidebarProps {
   isFileDragOver?: boolean;
   temporaryWorkspaceEnabled?: boolean;
   tempBasePath?: string;
+  remoteSession?: RemoteWindowSession | null;
+  onConnectRemoteHost?: () => void;
+  onSwitchRemoteHost?: () => void;
+  onDisconnectRemoteHost?: () => void;
 }
 
 export function RepositorySidebar({
@@ -107,6 +113,10 @@ export function RepositorySidebar({
   isFileDragOver,
   temporaryWorkspaceEnabled = false,
   tempBasePath = '',
+  remoteSession = null,
+  onConnectRemoteHost,
+  onSwitchRemoteHost,
+  onDisconnectRemoteHost,
 }: RepositorySidebarProps) {
   const { t, tNode } = useI18n();
   const _settingsDisplayMode = useSettingsStore((s) => s.settingsDisplayMode);
@@ -310,8 +320,8 @@ export function RepositorySidebar({
 
   const renderRepoItem = (repo: Repository, originalIndex: number, sectionGroupId?: string) => {
     const isSelected = selectedRepo === repo.path;
-    const displayRepoPath = trimTrailingPathSeparators(repo.path);
-    const useLtrPathDisplay = isWslUncPath(repo.path);
+    const displayRepoPath = getDisplayPath(repo.path);
+    const useLtrPathDisplay = isWslUncPath(displayRepoPath);
     return (
       <RepoItemWithGlow key={repo.path} repoPath={repo.path}>
         {/* Drop indicator - top */}
@@ -406,23 +416,35 @@ export function RepositorySidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region">
-        {onSwitchWorktreeByPath && (
-          <RunningProjectsPopover
-            onSelectWorktreeByPath={onSwitchWorktreeByPath}
-            onSwitchTab={onSwitchTab}
-          />
-        )}
-        {onCollapse && (
-          <button
-            type="button"
-            className="flex h-8 w-8 items-center justify-center rounded-md no-drag text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
-            onClick={onCollapse}
-            title={t('Collapse')}
-          >
-            <PanelLeftClose className="h-4 w-4" />
-          </button>
-        )}
+      <div className="flex h-12 items-center justify-between gap-2 border-b px-3 drag-region">
+        <div className="min-w-0">
+          {onConnectRemoteHost && (
+            <RemoteHostSidebarCard
+              remoteSession={remoteSession}
+              onConnect={onConnectRemoteHost}
+              onSwitchHost={remoteSession ? onSwitchRemoteHost : undefined}
+              onDisconnect={remoteSession ? onDisconnectRemoteHost : undefined}
+            />
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          {onSwitchWorktreeByPath && (
+            <RunningProjectsPopover
+              onSelectWorktreeByPath={onSwitchWorktreeByPath}
+              onSwitchTab={onSwitchTab}
+            />
+          )}
+          {onCollapse && (
+            <button
+              type="button"
+              className="flex h-8 w-8 items-center justify-center rounded-md no-drag text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+              onClick={onCollapse}
+              title={t('Collapse')}
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Group Selector - only show when groups are not hidden */}
@@ -453,7 +475,7 @@ export function RepositorySidebar({
       </div>
 
       {/* Repository List */}
-      <div className="flex-1 overflow-auto p-2">
+      <div className="flex-1 overflow-auto px-2 pb-2">
         {temporaryWorkspaceEnabled && (
           <div className="mb-2">
             <RepoItemWithGlow repoPath={TEMP_REPO_ID}>
@@ -500,9 +522,7 @@ export function RepositorySidebar({
             </EmptyMedia>
             <EmptyHeader>
               <EmptyTitle className="text-base">{t('Add Repository')}</EmptyTitle>
-              <EmptyDescription>
-                {t('Add a Git repository from a local folder to get started')}
-              </EmptyDescription>
+              <EmptyDescription>{t('Add a repository to get started.')}</EmptyDescription>
             </EmptyHeader>
             <Button
               onClick={(e) => {

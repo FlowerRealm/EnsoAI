@@ -1,8 +1,7 @@
-import { getPathBasename, joinPath } from '@shared/utils/path';
+import { getDisplayPathBasename, joinPath } from '@shared/utils/path';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, GitBranch, GripVertical, History, PanelLeft } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { GitSyncButton } from '@/components/git/GitSyncButton';
 import {
   AlertDialog,
   AlertDialogClose,
@@ -21,13 +20,7 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty';
 import { toastManager } from '@/components/ui/toast';
-import {
-  useGitBranches,
-  useGitCheckout,
-  useGitCreateBranch,
-  useGitPull,
-  useGitPush,
-} from '@/hooks/useGit';
+import { useGitBranches, useGitCheckout, useGitCreateBranch } from '@/hooks/useGit';
 import { useCommitDiff, useCommitFiles, useGitHistoryInfinite } from '@/hooks/useGitHistory';
 import { useGitSync } from '@/hooks/useGitSync';
 import {
@@ -65,6 +58,8 @@ interface SourceControlPanelProps {
   isActive?: boolean;
   onExpandWorktree?: () => void;
   worktreeCollapsed?: boolean;
+  emptyTitle?: string;
+  emptyDescription?: string;
 }
 
 export function SourceControlPanel({
@@ -72,6 +67,8 @@ export function SourceControlPanel({
   isActive = false,
   onExpandWorktree,
   worktreeCollapsed,
+  emptyTitle,
+  emptyDescription,
 }: SourceControlPanelProps) {
   const { t, tNode } = useI18n();
   const queryClient = useQueryClient();
@@ -114,7 +111,7 @@ export function SourceControlPanel({
   const skippedDirs = fileChangesResult?.skippedDirs;
 
   // Git sync operations using shared hook
-  const { refetchStatus, isSyncing, ahead, behind, tracking, currentBranch } = useGitSync({
+  const { refetchStatus, ahead, behind, tracking, currentBranch } = useGitSync({
     workdir: rootPath ?? '',
     enabled: isActive && !!rootPath,
   });
@@ -136,10 +133,6 @@ export function SourceControlPanel({
   // Submodules
   const { data: submodules = [], isLoading: submodulesLoading } = useSubmodules(rootPath ?? null);
 
-  // Generic pull/push mutations for both main repo and submodules
-  const pullMutation = useGitPull();
-  const pushMutation = useGitPush();
-
   // Submodule branches - fetch when a submodule is selected (must be before repositories useMemo)
   const { data: submoduleBranches = [], isLoading: submoduleBranchesLoading } =
     useSubmoduleBranches(rootPath ?? null, selectedSubmodulePath);
@@ -149,7 +142,7 @@ export function SourceControlPanel({
     if (!rootPath) return null;
     return {
       type: 'main',
-      name: getPathBasename(rootPath),
+      name: getDisplayPathBasename(rootPath),
       path: rootPath,
       branch: currentBranch ?? null,
       tracking: tracking ?? null,
@@ -260,146 +253,6 @@ export function SourceControlPanel({
       queryClient.invalidateQueries({ queryKey: ['git', 'submodule', 'changes', rootPath] });
     }
   }, [isActive, rootPath, refetch, refetchCommits, refetchStatus, queryClient]);
-
-  // Wrap sync handlers to add additional refetch calls for SourceControlPanel
-  const handleSync = useCallback(
-    async (repoPath: string) => {
-      if (!repoPath || pullMutation.isPending || pushMutation.isPending) return;
-
-      const isSubmodule = repoPath !== rootPath;
-      const repo = repositories.find((r) => r.path === repoPath);
-      if (!repo) return;
-
-      const repoAhead = repo.ahead;
-      const repoBehind = repo.behind;
-
-      try {
-        let pulled = false;
-        let pushed = false;
-
-        // Pull first if behind
-        if (repoBehind > 0) {
-          await pullMutation.mutateAsync({ workdir: repoPath });
-          pulled = true;
-        }
-        // Then push if ahead
-        if (repoAhead > 0) {
-          await pushMutation.mutateAsync({ workdir: repoPath });
-          pushed = true;
-        }
-
-        if (isSubmodule) {
-          queryClient.invalidateQueries({ queryKey: ['git', 'submodules', rootPath] });
-        } else {
-          refetchStatus();
-        }
-        refetch();
-        refetchCommits();
-
-        const branch = repo.branch ?? '';
-        if (pulled && pushed) {
-          toastManager.add({
-            title: t('Sync completed'),
-            description: t(
-              'Pulled {{pulled}} commit(s), pushed {{pushed}} commit(s) on {{branch}}',
-              { pulled: repoBehind, pushed: repoAhead, branch }
-            ),
-            type: 'success',
-            timeout: 3000,
-          });
-        } else if (pulled) {
-          toastManager.add({
-            title: t('Sync completed'),
-            description: t('Pulled {{count}} commit(s) on {{branch}}', {
-              count: repoBehind,
-              branch,
-            }),
-            type: 'success',
-            timeout: 3000,
-          });
-        } else if (pushed) {
-          toastManager.add({
-            title: t('Sync completed'),
-            description: t('Pushed {{count}} commit(s) on {{branch}}', {
-              count: repoAhead,
-              branch,
-            }),
-            type: 'success',
-            timeout: 3000,
-          });
-        } else {
-          toastManager.add({
-            title: t('Already up to date'),
-            description: t('{{branch}} is in sync with remote', { branch }),
-            type: 'success',
-            timeout: 2000,
-          });
-        }
-      } catch (error) {
-        toastManager.add({
-          title: t('Sync failed'),
-          description: error instanceof Error ? error.message : String(error),
-          type: 'error',
-          timeout: 5000,
-        });
-      }
-    },
-    [
-      rootPath,
-      repositories,
-      pullMutation,
-      pushMutation,
-      queryClient,
-      refetchStatus,
-      refetch,
-      refetchCommits,
-      t,
-    ]
-  );
-
-  const handlePublish = useCallback(
-    async (repoPath: string) => {
-      if (!repoPath || pushMutation.isPending) return;
-
-      const isSubmodule = repoPath !== rootPath;
-      const repo = repositories.find((r) => r.path === repoPath);
-      const branch = repo?.branch;
-
-      try {
-        await pushMutation.mutateAsync({
-          workdir: repoPath,
-          remote: 'origin',
-          branch: branch ?? undefined,
-          setUpstream: true,
-        });
-
-        if (isSubmodule) {
-          queryClient.invalidateQueries({ queryKey: ['git', 'submodules', rootPath] });
-        } else {
-          refetchStatus();
-        }
-        refetch();
-        refetchCommits();
-
-        toastManager.add({
-          title: t('Branch published'),
-          description: t('Branch {{branch}} is now tracking origin/{{branch}}', {
-            branch: branch ?? '',
-          }),
-          type: 'success',
-          timeout: 3000,
-        });
-      } catch (error) {
-        toastManager.add({
-          title: t('Publish failed'),
-          description: error instanceof Error ? error.message : String(error),
-          type: 'error',
-          timeout: 5000,
-        });
-      }
-    },
-    [rootPath, repositories, pushMutation, queryClient, refetchStatus, refetch, refetchCommits, t]
-  );
 
   // Branch checkout handler - handles both main repo and submodule branches
   const handleBranchCheckout = useCallback(
@@ -818,8 +671,10 @@ export function SourceControlPanel({
           <GitBranch className="h-4.5 w-4.5" />
         </EmptyMedia>
         <EmptyHeader>
-          <EmptyTitle>{t('Version Control')}</EmptyTitle>
-          <EmptyDescription>{t('Select a Worktree to view changes')}</EmptyDescription>
+          <EmptyTitle>{emptyTitle ?? t('Version Control')}</EmptyTitle>
+          <EmptyDescription>
+            {emptyDescription ?? t('Select a Worktree to view changes')}
+          </EmptyDescription>
         </EmptyHeader>
         {onExpandWorktree && worktreeCollapsed && (
           <Button onClick={onExpandWorktree} variant="outline" className="mt-2">

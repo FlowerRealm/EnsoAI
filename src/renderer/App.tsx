@@ -1,10 +1,12 @@
 import type {
   GitWorktree,
+  RemoteWindowOpenTarget,
   WorktreeCreateOptions,
   WorktreeMergeOptions,
   WorktreeMergeResult,
 } from '@shared/types';
-import { getPathBasename } from '@shared/utils/path';
+import { getDisplayPath, getDisplayPathBasename } from '@shared/utils/path';
+import { toRemoteVirtualPath } from '@shared/utils/remotePath';
 import { buildRepositoryId } from '@shared/utils/workspace';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -48,7 +50,7 @@ import { usePanelResize } from './App/usePanelResize';
 import { DevToolsOverlay } from './components/DevToolsOverlay';
 import { FileSidebar } from './components/files';
 import { UnsavedPromptHost } from './components/files/UnsavedPromptHost';
-import { AddRepositoryDialog } from './components/git';
+import { AddRepositoryDialog, type AddRepositoryDialogVariant } from './components/git';
 import { CloneProgressFloat } from './components/git/CloneProgressFloat';
 import { ActionPanel } from './components/layout/ActionPanel';
 import { BackgroundLayer } from './components/layout/BackgroundLayer';
@@ -85,6 +87,7 @@ import {
   useWorktreeResolveConflict,
 } from './hooks/useWorktree';
 import { useI18n } from './i18n';
+import { getBootstrappedRemoteSession } from './session/bootstrap';
 import { initCloneProgressListener } from './stores/cloneTasks';
 import { useEditorStore } from './stores/editor';
 import { useInitScriptStore } from './stores/initScript';
@@ -98,6 +101,19 @@ initCloneProgressListener();
 
 export default function App() {
   const { t } = useI18n();
+  const remoteSession = useMemo(() => getBootstrappedRemoteSession(), []);
+  const remoteSessionActive = remoteSession !== null;
+  const defaultDialogVariant: AddRepositoryDialogVariant = remoteSessionActive
+    ? 'add-remote-project'
+    : 'add-repository';
+  const [addRepoDialogVariant, setAddRepoDialogVariant] =
+    useState<AddRepositoryDialogVariant>(defaultDialogVariant);
+  const [remoteConnectionFailure, setRemoteConnectionFailure] = useState<{
+    connectionId: string;
+    target: RemoteWindowOpenTarget;
+    phaseLabel?: string;
+    message: string;
+  } | null>(null);
 
   // Initialize agent activity listener for tree sidebar status display
   useEffect(() => {
@@ -181,12 +197,23 @@ export default function App() {
     setInitialLocalPath,
     setActionPanelOpen,
     setCloseDialogOpen,
-    handleAddRepository,
   } = panelState;
 
+  const openLocalAddRepositoryDialog = useCallback(() => {
+    setAddRepoDialogVariant('add-repository');
+    setAddRepoDialogOpen(true);
+  }, [setAddRepoDialogOpen]);
+
+  useEffect(() => {
+    if (!addRepoDialogOpen) {
+      setAddRepoDialogVariant(defaultDialogVariant);
+    }
+  }, [addRepoDialogOpen, defaultDialogVariant]);
+
   const { isFileDragOver, repositorySidebarRef } = useFileDragDrop(
+    !remoteSessionActive,
     setInitialLocalPath,
-    setAddRepoDialogOpen
+    openLocalAddRepositoryDialog
   );
   const [fileSidebarCollapsed, setFileSidebarCollapsed] = useState(() =>
     getStoredBoolean(STORAGE_KEYS.FILE_SIDEBAR_COLLAPSED, false)
@@ -241,6 +268,7 @@ export default function App() {
     }
     return display;
   }, [effectiveTempBasePath]);
+  const effectiveTemporaryWorkspaceEnabled = temporaryWorkspaceEnabled && !remoteSessionActive;
 
   // Panel resize hook
   const {
@@ -350,7 +378,7 @@ export default function App() {
   }, [fileSidebarCollapsed]);
 
   useTempWorkspaceSync(
-    temporaryWorkspaceEnabled,
+    effectiveTemporaryWorkspaceEnabled,
     selectedRepo,
     activeWorktree,
     tempWorkspaces,
@@ -443,8 +471,8 @@ export default function App() {
   );
 
   useGroupSync(hideGroups, activeGroupId, setActiveGroupId, saveActiveGroupId);
-  useOpenPathListener(repositories, saveRepositories, setSelectedRepo);
-  useClaudeIntegration(activeWorktree?.path ?? null);
+  useOpenPathListener(!remoteSessionActive, repositories, saveRepositories, setSelectedRepo);
+  useClaudeIntegration(activeWorktree?.path ?? null, !remoteSessionActive);
   useCodeReviewContinue(activeWorktree, handleTabChange);
   useWorktreeSync(worktrees, activeWorktree, worktreesFetching, setActiveWorktree);
 
@@ -676,7 +704,7 @@ export default function App() {
               ? 'darwin'
               : 'linux',
       }),
-      name: getPathBasename(repoPath),
+      name: getDisplayPathBasename(repoPath),
       path: repoPath,
       kind: options?.kind ?? 'local',
       connectionId: options?.connectionId,
@@ -749,11 +777,15 @@ export default function App() {
   );
 
   const handleAddRemoteRepository = useCallback(
-    (remotePath: string, groupId: string | null, connectionId: string) => {
-      const candidate = createRepositoryEntry(remotePath, groupId, {
-        kind: 'remote',
-        connectionId,
-      });
+    async (remoteRepoPath: string, groupId: string | null, connectionId: string) => {
+      const candidate = createRepositoryEntry(
+        toRemoteVirtualPath(connectionId, remoteRepoPath),
+        groupId,
+        {
+          kind: 'remote',
+          connectionId,
+        }
+      );
       const existingRepo = findExistingRepository(candidate);
       if (existingRepo) {
         setSelectedRepo(existingRepo.path);
@@ -771,10 +803,108 @@ export default function App() {
       findExistingRepository,
       repositories,
       saveRepositories,
-      setActiveTab,
       setActiveWorktree,
+      setActiveTab,
       setSelectedRepo,
     ]
+  );
+
+  const handleOpenRemoteHost = useCallback(
+    async (connectionId: string, target: RemoteWindowOpenTarget): Promise<boolean> => {
+      setRemoteConnectionFailure(null);
+      const toastId = toastManager.add({
+        type: 'loading',
+        title: t('Connecting...'),
+        description: connectionId,
+        timeout: 0,
+      });
+
+      let active = true;
+      let latestPhaseLabel: string | undefined;
+      let latestDescription = connectionId;
+      const pollStatus = async () => {
+        while (active) {
+          try {
+            const status = await window.electronAPI.remote.getStatus(connectionId);
+            latestPhaseLabel = status.phaseLabel;
+            const nextDescription = status.phaseLabel || status.error || connectionId;
+            if (nextDescription !== latestDescription) {
+              latestDescription = nextDescription;
+              toastManager.update(toastId, {
+                type: 'loading',
+                title: t('Connecting...'),
+                description: nextDescription,
+                timeout: 0,
+              });
+            }
+          } catch {
+            // Ignore transient polling failures while the main connect request is in flight.
+          }
+          await new Promise((resolve) => {
+            window.setTimeout(resolve, 600);
+          });
+        }
+      };
+      const pollPromise = pollStatus();
+
+      try {
+        const opened = await window.electronAPI.remote.openSession({
+          profileOrId: connectionId,
+          target,
+        });
+        active = false;
+        await pollPromise.catch(() => {});
+        toastManager.close(toastId);
+        if (!opened) {
+          return false;
+        }
+        return true;
+      } catch (error) {
+        active = false;
+        await pollPromise.catch(() => {});
+        toastManager.close(toastId);
+        const message = error instanceof Error ? error.message : String(error);
+        const phaseLabel = latestPhaseLabel;
+        setRemoteConnectionFailure({
+          connectionId,
+          target,
+          phaseLabel,
+          message,
+        });
+        toastManager.add({
+          type: 'error',
+          title: t('Failed to connect to remote host'),
+          description: phaseLabel ? `${phaseLabel}\n${message}` : message,
+        });
+        throw error;
+      }
+    },
+    [t]
+  );
+
+  const handleOpenRepositoryDialog = useCallback(() => {
+    setAddRepoDialogVariant(defaultDialogVariant);
+    setAddRepoDialogOpen(true);
+  }, [defaultDialogVariant, setAddRepoDialogOpen]);
+
+  const handleOpenRemoteHostDialog = useCallback(() => {
+    setInitialLocalPath(null);
+    setAddRepoDialogVariant('connect-remote-host');
+    setAddRepoDialogOpen(true);
+  }, [setAddRepoDialogOpen, setInitialLocalPath]);
+
+  const handleDisconnectRemoteHost = useCallback(() => {
+    void window.electronAPI.remote.closeSession();
+  }, []);
+
+  const handleAddRepoDialogOpenChange = useCallback(
+    (open: boolean) => {
+      setAddRepoDialogOpen(open);
+      if (!open) {
+        setAddRepoDialogVariant(defaultDialogVariant);
+      }
+    },
+    [defaultDialogVariant, setAddRepoDialogOpen]
   );
 
   const setPendingScript = useInitScriptStore((s) => s.setPendingScript);
@@ -824,7 +954,7 @@ export default function App() {
     const toastId = toastManager.add({
       type: 'loading',
       title: t('Deleting...'),
-      description: worktree.branch || worktree.path,
+      description: worktree.branch || getDisplayPath(worktree.path),
       timeout: 0,
     });
 
@@ -853,7 +983,7 @@ export default function App() {
         toastManager.add({
           type: 'success',
           title: t('Worktree deleted'),
-          description: worktree.branch || worktree.path,
+          description: worktree.branch || getDisplayPath(worktree.path),
         });
       })
       .catch((err) => {
@@ -1028,7 +1158,7 @@ export default function App() {
                   error={worktreeError}
                   onSelectRepo={handleSelectRepo}
                   onSelectWorktree={handleSelectWorktree}
-                  onAddRepository={handleAddRepository}
+                  onAddRepository={handleOpenRepositoryDialog}
                   onRemoveRepository={handleRemoveRepository}
                   onCreateWorktree={handleCreateWorktree}
                   onRemoveWorktree={handleRemoveWorktree}
@@ -1052,7 +1182,7 @@ export default function App() {
                   onMoveToGroup={handleMoveToGroup}
                   onSwitchTab={setActiveTab}
                   onSwitchWorktreeByPath={handleSwitchWorktreePath}
-                  temporaryWorkspaceEnabled={temporaryWorkspaceEnabled}
+                  temporaryWorkspaceEnabled={effectiveTemporaryWorkspaceEnabled}
                   tempWorkspaces={tempWorkspaces}
                   tempBasePath={tempBasePathDisplay}
                   onSelectTempWorkspace={handleSelectTempWorkspace}
@@ -1063,6 +1193,10 @@ export default function App() {
                   isSettingsActive={activeTab === 'settings'}
                   onToggleSettings={toggleSettings}
                   isFileDragOver={isFileDragOver}
+                  remoteSession={remoteSession}
+                  onConnectRemoteHost={handleOpenRemoteHostDialog}
+                  onSwitchRemoteHost={remoteSession ? handleOpenRemoteHostDialog : undefined}
+                  onDisconnectRemoteHost={remoteSession ? handleDisconnectRemoteHost : undefined}
                 />
                 {/* Resize handle */}
                 <div
@@ -1091,7 +1225,7 @@ export default function App() {
                     repositories={repositories}
                     selectedRepo={selectedRepo}
                     onSelectRepo={handleSelectRepo}
-                    onAddRepository={handleAddRepository}
+                    onAddRepository={handleOpenRepositoryDialog}
                     onRemoveRepository={handleRemoveRepository}
                     onReorderRepositories={handleReorderRepositories}
                     onOpenSettings={openSettings}
@@ -1109,8 +1243,12 @@ export default function App() {
                     isSettingsActive={activeTab === 'settings'}
                     onToggleSettings={toggleSettings}
                     isFileDragOver={isFileDragOver}
-                    temporaryWorkspaceEnabled={temporaryWorkspaceEnabled}
+                    temporaryWorkspaceEnabled={effectiveTemporaryWorkspaceEnabled}
                     tempBasePath={tempBasePathDisplay}
+                    remoteSession={remoteSession}
+                    onConnectRemoteHost={handleOpenRemoteHostDialog}
+                    onSwitchRemoteHost={remoteSession ? handleOpenRemoteHostDialog : undefined}
+                    onDisconnectRemoteHost={remoteSession ? handleDisconnectRemoteHost : undefined}
                   />
                   {/* Resize handle */}
                   <div
@@ -1148,7 +1286,7 @@ export default function App() {
                       worktrees={sortedWorktrees}
                       activeWorktree={activeWorktree}
                       branches={branches}
-                      projectName={selectedRepo ? getPathBasename(selectedRepo) : ''}
+                      projectName={selectedRepo ? getDisplayPathBasename(selectedRepo) : ''}
                       isLoading={worktreesLoading}
                       isCreating={createWorktreeMutation.isPending}
                       error={worktreeError}
@@ -1237,12 +1375,15 @@ export default function App() {
         {/* Add Repository Dialog */}
         <AddRepositoryDialog
           open={addRepoDialogOpen}
-          onOpenChange={setAddRepoDialogOpen}
+          onOpenChange={handleAddRepoDialogOpenChange}
+          variant={addRepoDialogVariant}
           groups={sortedGroups}
           defaultGroupId={activeGroupId === ALL_GROUP_ID ? null : activeGroupId}
+          remoteSession={remoteSession}
           onAddLocal={handleAddLocalRepository}
           onCloneComplete={handleCloneRepository}
           onAddRemote={handleAddRemoteRepository}
+          onOpenRemoteHost={handleOpenRemoteHost}
           onCreateGroup={handleCreateGroup}
           initialLocalPath={initialLocalPath ?? undefined}
           onClearInitialLocalPath={() => setInitialLocalPath(null)}
@@ -1274,6 +1415,53 @@ export default function App() {
 
         {/* Remote SSH Auth Prompt Host */}
         <RemoteAuthPromptHost />
+
+        <Dialog
+          open={remoteConnectionFailure !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setRemoteConnectionFailure(null);
+            }
+          }}
+        >
+          <DialogPopup className="sm:max-w-lg" showCloseButton={false}>
+            <DialogHeader>
+              <DialogTitle>{t('Remote connection failed')}</DialogTitle>
+              <DialogDescription>
+                {t('The remote host window could not be opened. Review the failure details below.')}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 px-6 pb-2 text-sm">
+              {remoteConnectionFailure?.phaseLabel ? (
+                <div className="rounded-lg border bg-muted/30 px-3 py-2">
+                  <div className="text-muted-foreground text-xs">{t('Connection stage')}</div>
+                  <div className="mt-1 font-medium">{remoteConnectionFailure.phaseLabel}</div>
+                </div>
+              ) : null}
+              <div className="rounded-lg border border-destructive/24 bg-destructive/6 px-3 py-3">
+                <div className="text-destructive text-xs font-medium">{t('Error details')}</div>
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-foreground">
+                  {remoteConnectionFailure?.message}
+                </pre>
+              </div>
+            </div>
+            <DialogFooter variant="bare">
+              <Button variant="outline" onClick={() => setRemoteConnectionFailure(null)}>
+                {t('Close')}
+              </Button>
+              <Button
+                onClick={() => {
+                  if (!remoteConnectionFailure) return;
+                  const retry = remoteConnectionFailure;
+                  setRemoteConnectionFailure(null);
+                  void handleOpenRemoteHost(retry.connectionId, retry.target);
+                }}
+              >
+                {t('Retry')}
+              </Button>
+            </DialogFooter>
+          </DialogPopup>
+        </Dialog>
 
         {/* Close Confirmation Dialog */}
         <Dialog

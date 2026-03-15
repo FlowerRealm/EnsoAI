@@ -52,7 +52,7 @@ import { setCurrentLocale } from './services/i18n';
 import { buildAppMenu } from './services/MenuBuilder';
 import { webInspectorServer } from './services/webInspector';
 import log, { initLogger } from './utils/logger';
-import { createMainWindow } from './windows/MainWindow';
+import { openLocalWindow } from './windows/WindowManager';
 
 let mainWindow: BrowserWindow | null = null;
 let pendingOpenPath: string | null = null;
@@ -165,9 +165,10 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', (_, commandLine) => {
     // Focus existing window
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+    const window = getAnyWindow();
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.focus();
     }
     // Handle command line from second instance
     handleCommandLineArgs(commandLine);
@@ -569,23 +570,12 @@ app.whenReady().then(async () => {
 
   setCurrentLocale(readStoredLanguage());
 
-  mainWindow = createMainWindow();
+  cleanupWindowHandlers = registerWindowHandlers();
+  mainWindow = openLocalWindow();
 
   // Set main window for Web Inspector server (for IPC communication)
   webInspectorServer.setMainWindow(mainWindow);
 
-  // Register window control handlers (must be after mainWindow is created)
-  cleanupWindowHandlers = registerWindowHandlers(mainWindow);
-
-  // Clean up window handlers when window is closed
-  mainWindow.on('closed', () => {
-    if (cleanupWindowHandlers) {
-      cleanupWindowHandlers();
-      cleanupWindowHandlers = null;
-    }
-    webInspectorServer.setMainWindow(null);
-    mainWindow = null;
-  });
   // Initialize Claude Provider Watcher (only when enableProviderWatcher is true)
   const appSettings = readSettings();
   const providerWatcherEnabled =
@@ -609,11 +599,11 @@ app.whenReady().then(async () => {
   gitAutoFetchService.init(mainWindow);
 
   const handleNewWindow = () => {
-    createMainWindow();
+    openLocalWindow();
   };
 
   // Build and set application menu
-  const menu = buildAppMenu(mainWindow, {
+  const menu = buildAppMenu({
     onNewWindow: handleNewWindow,
   });
   Menu.setApplicationMenu(menu);
@@ -623,8 +613,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle(IPC_CHANNELS.APP_SET_LANGUAGE, (_event, language: Locale) => {
     setCurrentLocale(language);
-    if (!mainWindow) return;
-    const updatedMenu = buildAppMenu(mainWindow, {
+    const updatedMenu = buildAppMenu({
       onNewWindow: handleNewWindow,
     });
     Menu.setApplicationMenu(updatedMenu);
@@ -632,8 +621,13 @@ app.whenReady().then(async () => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createMainWindow();
+      mainWindow = openLocalWindow();
     }
+  });
+
+  app.on('browser-window-focus', (_, window) => {
+    mainWindow = window;
+    webInspectorServer.setMainWindow(window);
   });
 });
 
@@ -650,6 +644,8 @@ app.on('will-quit', (event) => {
   event.preventDefault();
   isQuittingCleanupRunning = true;
   console.log('[app] Will quit, cleaning up...');
+  cleanupWindowHandlers?.();
+  cleanupWindowHandlers = null;
   unwatchClaudeSettings();
   gitAutoFetchService.cleanup();
 
@@ -706,3 +702,6 @@ function handleShutdownSignal(signal: string): void {
 process.on('SIGINT', () => handleShutdownSignal('SIGINT'));
 process.on('SIGTERM', () => handleShutdownSignal('SIGTERM'));
 process.on('SIGHUP', () => handleShutdownSignal('SIGHUP'));
+function getAnyWindow(): BrowserWindow | null {
+  return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
+}

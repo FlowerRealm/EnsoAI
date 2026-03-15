@@ -3,6 +3,7 @@ export type Locale = 'en' | 'zh';
 export const zhTranslations: Record<string, string> = {
   'Action Panel': '操作面板',
   'Add Repository': '添加仓库',
+  'Add a repository to get started.': '添加一个仓库开始使用。',
   'Add Workspace': '新建工作区',
   'Add agent': '添加 Agent',
   'Add to favorites': '添加收藏',
@@ -89,6 +90,7 @@ export const zhTranslations: Record<string, string> = {
   'Check for updates': '检查更新',
   'Check failed': '检查失败',
   'Checking...': '检查中...',
+  'Connecting...': '连接中...',
   characters: '字符',
   Chat: '聊天',
   'Choose base branch...': '选择基准分支...',
@@ -152,6 +154,7 @@ export const zhTranslations: Record<string, string> = {
   'Create a new branch and work in a separate directory to handle multiple tasks.':
     '创建新分支并在独立目录中工作，可同时处理多个功能',
   Current: '当前',
+  'Current Window': '当前窗口',
   'Custom Agent': '自定义 Agent',
   'Custom CLI tools': '添加自定义 CLI 工具',
   Default: '默认',
@@ -989,8 +992,8 @@ export const zhTranslations: Record<string, string> = {
   'Use .gitignore': '使用 .gitignore',
   // Remote Connection
   'Remote Connection': '远程连接',
-  'Save SSH profiles here, then add a remote workspace from the Add Repository dialog.':
-    '在这里保存 SSH 配置，然后在“添加仓库”对话框中添加远程工作区。',
+  'Save SSH profiles here, then use the Remote Host entry in the sidebar to open a full remote window.':
+    '在这里保存 SSH 配置，然后通过侧边栏中的“远程主机”入口打开完整远程窗口。',
   'SSH Profiles': 'SSH 配置',
   'These profiles reuse your existing SSH configuration and credentials.':
     '这些配置会复用你现有的 SSH 配置和凭据。',
@@ -1005,15 +1008,24 @@ export const zhTranslations: Record<string, string> = {
   'Use the same target string you would pass to the ssh command.':
     '填写与 ssh 命令相同的目标字符串。',
   'Helper install directory': '助手安装目录',
+  'Runtime install directory': '运行时安装目录',
   'Optional override, for example ~/.ensoai/remote-helper':
     '可选覆盖目录，例如 ~/.ensoai/remote-helper',
+  'Optional override, for example ~/.ensoai/remote-runtime':
+    '可选覆盖目录，例如 ~/.ensoai/remote-runtime',
   'Remote Helper': '远程助手',
+  'Managed Remote Runtime': '托管远程运行时',
   'Install, refresh, update, or remove the helper on the selected remote host.':
     '在选中的远程主机上安装、刷新、更新或删除助手。',
+  'Install, refresh, update, or remove the managed runtime on the selected remote host.':
+    '在选中的远程主机上安装、刷新、更新或删除托管运行时。',
   'Select a profile': '选择一个配置',
   'Choose a saved SSH profile above before managing the remote helper.':
     '请先在上方选择一个已保存的 SSH 配置，再管理远程助手。',
+  'Choose a saved SSH profile above before managing the remote runtime.':
+    '请先在上方选择一个已保存的 SSH 配置，再管理远程运行时。',
   'Helper status': '助手状态',
+  'Runtime status': '运行时状态',
   'Current version': '当前版本',
   'Install directory': '安装目录',
   'Installed versions': '已安装版本',
@@ -1023,21 +1035,36 @@ export const zhTranslations: Record<string, string> = {
   'Refresh status': '刷新状态',
   Update: '更新',
   'Delete helper': '删除助手',
+  'Delete runtime': '删除运行时',
   'Delete remote helper?': '删除远程助手？',
+  'Delete managed remote runtime?': '删除托管远程运行时？',
   'This will remove all installed helper versions for this SSH profile.':
     '这会删除该 SSH 配置下安装的所有助手版本。',
+  'This will remove all installed managed runtime versions for this SSH profile.':
+    '这会删除该 SSH 配置下安装的所有托管运行时版本。',
   'Failed to refresh helper status': '刷新助手状态失败',
+  'Failed to refresh runtime status': '刷新运行时状态失败',
   'Failed to install helper': '安装助手失败',
+  'Failed to install runtime': '安装运行时失败',
   'Failed to update helper': '更新助手失败',
+  'Failed to update runtime': '更新运行时失败',
   'Failed to delete helper': '删除助手失败',
+  'Failed to delete runtime': '删除运行时失败',
   'Helper installed': '助手已安装',
+  'Runtime installed': '运行时已安装',
   'The current remote helper version is now installed.': '当前远程助手版本已安装。',
+  'The managed remote runtime is now installed on this host.': '托管远程运行时现已安装到该主机。',
   'Helper updated': '助手已更新',
+  'Runtime updated': '运行时已更新',
   'The current remote helper version was reinstalled successfully.':
     '当前远程助手版本已成功重新安装。',
+  'The managed remote runtime was reinstalled successfully.': '托管远程运行时已成功重新安装。',
   'Helper deleted': '助手已删除',
+  'Runtime deleted': '运行时已删除',
   'All installed helper versions for this profile were removed.':
     '该配置下所有已安装的助手版本都已删除。',
+  'All installed managed runtime versions for this profile were removed.':
+    '该配置下所有已安装的托管运行时版本都已删除。',
   'Platform hint': '平台提示',
   'Auto detect': '自动识别',
   'Save profile': '保存配置',
@@ -1053,7 +1080,8 @@ export const zhTranslations: Record<string, string> = {
   'Use the same target you would pass to ssh, for example user@example.com.':
     '填写与 ssh 命令相同的目标，例如 user@example.com。',
   'Remote profile saved': '远程配置已保存',
-  'You can now use it from Add Repository > SSH.': '现在可以在“添加仓库 > SSH”中使用它。',
+  'You can now use it from the Remote Host entry in the sidebar.':
+    '现在可以从侧边栏中的“远程主机”入口打开它。',
   'Failed to save remote profile': '保存远程配置失败',
   'Remote profile deleted': '远程配置已删除',
   'The saved SSH connection has been removed.': '已删除保存的 SSH 连接配置。',
@@ -1064,6 +1092,8 @@ export const zhTranslations: Record<string, string> = {
   'Connection succeeded': '连接成功',
   'The remote host is reachable and ready for Enso remote helper setup.':
     '远程主机可访问，已可继续安装 Enso 远程助手。',
+  'The remote host is reachable and ready for managed runtime setup.':
+    '远程主机可访问，已可继续安装托管远程运行时。',
   'Connection failed': '连接失败',
   'SSH password required': '需要 SSH 密码',
   'SSH key passphrase required': '需要 SSH 密钥口令',
@@ -1089,34 +1119,100 @@ export const zhTranslations: Record<string, string> = {
   'SSH handshake ended before host verification': 'SSH 握手在主机验证完成前就结束了',
   'SSH handshake timed out before host verification': 'SSH 握手在主机验证完成前超时',
   'Add a local Git repository, clone from a remote URL, or attach a remote workspace over SSH.':
-    '添加本地 Git 仓库、从远程 URL 克隆，或通过 SSH 挂载远程工作区。',
+    '添加本地 Git 仓库、从远程 URL 克隆，或通过 SSH 打开完整远程主机窗口。',
   'Failed to browse remote roots': '读取远程根目录失败',
+  'Failed to browse remote host directories': '读取远程主机目录失败',
   'Please choose an SSH profile first': '请先选择一个 SSH 配置',
   'Please enter the remote repository path': '请输入远程仓库路径',
   'Failed to connect to remote host': '连接远程主机失败',
+  'Remote Host': '远程主机',
+  'Add Project': '添加项目',
+  'Switch Host': '切换主机',
+  Disconnect: '断开连接',
+  'Disconnect Remote Host': '断开远程主机',
+  'Connect to Remote Host': '连接远程主机',
+  'This whole window is attached to the current remote host.': '整个窗口已经附着到当前远程主机。',
+  'This window is already attached to the selected remote host.':
+    '这个窗口已经连接到选中的远程主机。',
+  'Open a full remote host window over SSH. This window will switch completely to that host.':
+    '通过 SSH 打开完整远程主机窗口。连接后当前窗口会完整切换到该主机。',
+  'Connecting will open a full remote host window, not a single folder.':
+    '连接后会打开完整远程主机窗口，而不是挂载单个文件夹。',
+  'After connecting, the whole window switches to that remote host.':
+    '连接后整个窗口都会切换到那个远程主机。',
+  'Add a project folder from the current remote host into this window.':
+    '在当前窗口中添加一个仓库。',
+  'Add a project folder from the current remote host to get started.':
+    '从当前窗口添加一个仓库开始使用。',
+  'Choose a project folder on the current remote host.': '选择当前窗口中的仓库目录。',
+  'Current location': '当前位置',
+  'No folder selected': '尚未选择文件夹',
+  'Go to parent folder': '返回上级文件夹',
+  'Loading folders...': '正在加载文件夹...',
+  'This folder has no subfolders': '这个文件夹没有子文件夹',
+  'Choose a root folder to start browsing': '先选择一个根目录再开始浏览',
+  'The selected folder will be added as a remote project in this window.':
+    '选中的目录会作为仓库添加到当前窗口中。',
+  'Please choose a remote folder': '请选择仓库目录',
+  'Please choose a project directory on this host': '请选择仓库目录',
+  'Remote host': '远程主机',
+  'Remote folder': '仓库目录',
+  'Project directory on this host': '仓库目录',
+  'Open in': '打开到',
   'SSH profile': 'SSH 配置',
   'Loading profiles...': '正在加载配置...',
   'Select a saved SSH profile': '选择已保存的 SSH 配置',
   'No saved profiles': '没有已保存的 SSH 配置',
   'Create SSH profiles in Settings > Remote Connection first.':
     '请先到“设置 > 远程连接”中创建 SSH 配置。',
+  'Create SSH profiles in Settings > Remote Connection first, then use the Remote Host entry to connect.':
+    '请先到“设置 > 远程连接”中创建 SSH 配置，然后通过“远程主机”入口连接。',
   'The same SSH credentials and config you already use will be reused here.':
     '这里会复用你当前已经在用的 SSH 凭据和配置。',
   'Remote repository path': '远程仓库路径',
   '/srv/project or ~/workspace/project': '/srv/project 或 ~/workspace/project',
   'Resolving remote roots...': '正在解析远程根目录...',
+  'Resolving directories on this host...': '正在解析目录...',
   'Pick a root below or type the full repository path on the remote host.':
     '可先选择下方根目录，或直接输入远程主机上的完整仓库路径。',
+  'Choose a project directory on the current remote host.': '选择当前窗口中的仓库目录。',
+  'The selected directory will be added as a project from this remote host in the current window.':
+    '选中的目录会作为仓库添加到当前窗口中。',
   SSH: 'SSH',
   Node: 'Node',
   Connect: '连接',
   'Failed to test remote connection': '测试远程连接失败',
   'Failed to resolve remote home directory': '获取远程主目录失败',
   'Remote helper bootstrap timed out': '远程助手启动校验超时',
+  'Remote server bootstrap timed out': '远程服务启动校验超时',
   'Remote helper exited ({{reason}})': '远程助手已退出（{{reason}}）',
+  'Remote server exited ({{reason}})': '远程服务已退出（{{reason}}）',
   'Remote helper disconnected': '远程助手连接已断开',
+  'Remote server disconnected': '远程服务连接已断开',
   'Failed to establish remote helper for {{connectionId}}':
     '无法为连接 {{connectionId}} 建立远程助手',
+  'Failed to establish remote server for {{connectionId}}':
+    '无法为连接 {{connectionId}} 建立远程服务',
+  'Checking SSH host...': '正在检查 SSH 主机...',
+  'Resolving remote platform...': '正在识别远程平台...',
+  'Preparing managed remote runtime...': '正在准备托管远程运行时...',
+  'Uploading managed remote runtime...': '正在上传托管远程运行时...',
+  'Extracting managed remote runtime...': '正在解压托管远程运行时...',
+  'Syncing remote server files...': '正在同步远程服务文件...',
+  'Starting remote server...': '正在启动远程服务...',
+  'Waiting for remote server handshake...': '正在等待远程服务握手...',
+  'Generated remote server source is invalid': '生成的远程服务代码无效',
+  'Failed to start remote server': '启动远程服务失败',
+  'Managed remote runtime verification failed during {{step}}':
+    '托管远程运行时在“{{step}}”阶段校验失败',
+  'Managed runtime node --version': '托管运行时 node --version 检查',
+  'Managed remote server self-test': '托管远程服务自检',
+  'Unsupported remote server mode': '不支持的远程服务模式',
+  'Remote connection failed': '远程连接失败',
+  'Connection stage': '连接阶段',
+  'The remote host window could not be opened. Review the failure details below.':
+    '无法打开远程主机窗口。请查看下面的失败详情。',
+  'Error details': '错误详情',
   'Unknown remote profile: {{connectionId}}': '未知的远程配置：{{connectionId}}',
   'Remote platform unavailable for {{connectionId}}':
     '无法获取连接 {{connectionId}} 的远程平台信息',

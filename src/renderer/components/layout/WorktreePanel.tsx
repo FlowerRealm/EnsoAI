@@ -1,5 +1,5 @@
 import type { GitBranch as GitBranchType, GitWorktree, WorktreeCreateOptions } from '@shared/types';
-import { getPathBasename, isWslUncPath } from '@shared/utils/path';
+import { getDisplayPath, getDisplayPathBasename, isWslUncPath } from '@shared/utils/path';
 import { LayoutGroup, motion } from 'framer-motion';
 import {
   Copy,
@@ -110,7 +110,7 @@ export function WorktreePanel({
 
       // Create styled drag image
       const dragImage = document.createElement('div');
-      dragImage.textContent = worktree.branch || getPathBasename(worktree.path);
+      dragImage.textContent = worktree.branch || getDisplayPathBasename(worktree.path);
       dragImage.style.cssText = `
         position: fixed;
         top: -9999px;
@@ -170,7 +170,7 @@ export function WorktreePanel({
     .filter(
       ({ worktree: wt }) =>
         wt.branch?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        wt.path.toLowerCase().includes(searchQuery.toLowerCase())
+        getDisplayPath(wt.path).toLowerCase().includes(searchQuery.toLowerCase())
     );
 
   // Get the main worktree path for git operations
@@ -498,7 +498,8 @@ function WorktreeItem({
     worktree.isMainWorktree || worktree.branch === 'main' || worktree.branch === 'master';
   const branchDisplay = worktree.branch || t('Detached');
   const isPrunable = worktree.prunable;
-  const useLtrPathDisplay = isWslUncPath(worktree.path);
+  const displayWorktreePath = getDisplayPath(worktree.path);
+  const useLtrPathDisplay = isWslUncPath(displayWorktreePath);
   const glowEnabled = useGlowEffectEnabled();
 
   // Git sync operations
@@ -533,7 +534,7 @@ function WorktreeItem({
 
   const handleCopyPath = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(worktree.path);
+      await navigator.clipboard.writeText(displayWorktreePath);
       toastManager.add({
         title: t('Copied'),
         description: t('Path copied to clipboard'),
@@ -549,7 +550,7 @@ function WorktreeItem({
         timeout: 3000,
       });
     }
-  }, [t, worktree.path]);
+  }, [displayWorktreePath, t]);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -664,9 +665,9 @@ function WorktreeItem({
             isPrunable && 'line-through',
             isActive ? 'text-accent-foreground/70' : 'text-muted-foreground'
           )}
-          title={worktree.path}
+          title={displayWorktreePath}
         >
-          {worktree.path}
+          {displayWorktreePath}
         </div>
 
         {/* Activity counts and diff stats (only shown when has active sessions) */}

@@ -1,10 +1,11 @@
 import type {
   GitBranch as GitBranchType,
   GitWorktree,
+  RemoteWindowSession,
   TempWorkspaceItem,
   WorktreeCreateOptions,
 } from '@shared/types';
-import { getPathBasename, isWslUncPath, trimTrailingPathSeparators } from '@shared/utils/path';
+import { getDisplayPath, getDisplayPathBasename, isWslUncPath } from '@shared/utils/path';
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import {
   ChevronRight,
@@ -75,7 +76,6 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty';
 import { GlowBorder, type GlowState, useGlowEffectEnabled } from '@/components/ui/glow-card';
-import { RepoItemWithGlow } from '@/components/ui/glow-wrappers';
 import { toastManager } from '@/components/ui/toast';
 import { CreateWorktreeDialog } from '@/components/worktree/CreateWorktreeDialog';
 import { useGitSync } from '@/hooks/useGitSync';
@@ -87,6 +87,7 @@ import { heightVariants, springFast, springStandard } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { useWorktreeActivityStore } from '@/stores/worktreeActivity';
+import { RemoteHostSidebarCard } from '../remote/RemoteHostSidebarCard';
 import { RunningProjectsPopover } from './RunningProjectsPopover';
 
 interface TreeSidebarProps {
@@ -137,6 +138,10 @@ interface TreeSidebarProps {
   toggleSelectedRepoExpandedRef?: React.MutableRefObject<(() => void) | null>;
   /** Whether a file is being dragged over the sidebar (from App.tsx global handler) */
   isFileDragOver?: boolean;
+  remoteSession?: RemoteWindowSession | null;
+  onConnectRemoteHost?: () => void;
+  onSwitchRemoteHost?: () => void;
+  onDisconnectRemoteHost?: () => void;
 }
 
 export function TreeSidebar({
@@ -182,6 +187,10 @@ export function TreeSidebar({
   onRequestTempDelete,
   toggleSelectedRepoExpandedRef,
   isFileDragOver,
+  remoteSession = null,
+  onConnectRemoteHost,
+  onSwitchRemoteHost,
+  onDisconnectRemoteHost,
 }: TreeSidebarProps) {
   const { t, tNode } = useI18n();
   const _settingsDisplayMode = useSettingsStore((s) => s.settingsDisplayMode);
@@ -455,7 +464,7 @@ export function TreeSidebar({
       e.dataTransfer.setData('text/plain', `worktree:${index}`);
 
       const dragImage = document.createElement('div');
-      dragImage.textContent = worktree.branch || getPathBasename(worktree.path);
+      dragImage.textContent = worktree.branch || getDisplayPathBasename(worktree.path);
       dragImage.style.cssText = `
         position: fixed;
         top: -9999px;
@@ -576,7 +585,9 @@ export function TreeSidebar({
         if (repo.name.toLowerCase().includes(query)) return true;
         const repoWorktrees = worktreesMap[repo.path] || [];
         return repoWorktrees.some(
-          (wt) => wt.branch?.toLowerCase().includes(query) || wt.path.toLowerCase().includes(query)
+          (wt) =>
+            wt.branch?.toLowerCase().includes(query) ||
+            getDisplayPath(wt.path).toLowerCase().includes(query)
         );
       });
     }
@@ -643,7 +654,9 @@ export function TreeSidebar({
       if (!searchQuery) return repoWorktrees;
       const query = searchQuery.toLowerCase();
       return repoWorktrees.filter(
-        (wt) => wt.branch?.toLowerCase().includes(query) || wt.path.toLowerCase().includes(query)
+        (wt) =>
+          wt.branch?.toLowerCase().includes(query) ||
+          getDisplayPath(wt.path).toLowerCase().includes(query)
       );
     },
     [worktreesMap, searchQuery]
@@ -658,8 +671,8 @@ export function TreeSidebar({
     const repoWts = worktreesMap[repo.path] || [];
     const repoMainWorktree = repoWts.find((wt) => wt.isMainWorktree);
     const workdir = repoMainWorktree?.path || repo.path;
-    const displayRepoPath = trimTrailingPathSeparators(repo.path);
-    const useLtrPathDisplay = isWslUncPath(repo.path);
+    const displayRepoPath = getDisplayPath(repo.path);
+    const useLtrPathDisplay = isWslUncPath(displayRepoPath);
 
     return (
       <div key={repo.path} className={cn('relative rounded-lg', isSelected && 'pb-2')}>
@@ -889,7 +902,17 @@ export function TreeSidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region">
+      <div className="flex h-12 items-center justify-between gap-2 border-b px-3 drag-region">
+        <div className="min-w-0">
+          {onConnectRemoteHost && (
+            <RemoteHostSidebarCard
+              remoteSession={remoteSession}
+              onConnect={onConnectRemoteHost}
+              onSwitchHost={remoteSession ? onSwitchRemoteHost : undefined}
+              onDisconnect={remoteSession ? onDisconnectRemoteHost : undefined}
+            />
+          )}
+        </div>
         <div className="flex items-center gap-1">
           {/* Manage repositories button */}
           <button
@@ -955,7 +978,7 @@ export function TreeSidebar({
       </div>
 
       {/* Tree List */}
-      <div className="flex-1 overflow-auto p-2">
+      <div className="flex-1 overflow-auto px-2 pb-2">
         {temporaryWorkspaceEnabled && (
           <div className="mb-2">
             <div
@@ -1059,9 +1082,7 @@ export function TreeSidebar({
             </EmptyMedia>
             <EmptyHeader>
               <EmptyTitle className="text-base">{t('Add Repository')}</EmptyTitle>
-              <EmptyDescription>
-                {t('Add a Git repository from a local folder to get started')}
-              </EmptyDescription>
+              <EmptyDescription>{t('Add a repository to get started.')}</EmptyDescription>
             </EmptyHeader>
             <Button
               onClick={(e) => {
@@ -1409,7 +1430,7 @@ export function TreeSidebar({
         open={createWorktreeDialogOpen}
         onOpenChange={setCreateWorktreeDialogOpen}
         branches={branches}
-        projectName={selectedRepo ? getPathBasename(selectedRepo) : ''}
+        projectName={selectedRepo ? getDisplayPathBasename(selectedRepo) : ''}
         workdir={workdir}
         isLoading={isCreating}
         onSubmit={async (options) => {
@@ -1584,6 +1605,7 @@ function WorktreeTreeItem({
   const branchDisplay = worktree.branch || t('Detached');
   const isPrunable = worktree.prunable;
   const glowEnabled = useGlowEffectEnabled();
+  const displayWorktreePath = getDisplayPath(worktree.path);
 
   // Check if branch is merged to main
   const isMerged = useMemo(() => {
@@ -1623,7 +1645,7 @@ function WorktreeTreeItem({
   }, [isActive, activityState, worktree.path]);
 
   // Check if any session in this worktree has outputting or unread state
-  const outputState = useWorktreeOutputState(worktree.path);
+  const _outputState = useWorktreeOutputState(worktree.path);
 
   // Git sync operations
   const {
@@ -1638,7 +1660,7 @@ function WorktreeTreeItem({
 
   const handleCopyPath = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(worktree.path);
+      await navigator.clipboard.writeText(displayWorktreePath);
       toastManager.add({
         title: t('Copied'),
         description: t('Path copied to clipboard'),
@@ -1654,7 +1676,7 @@ function WorktreeTreeItem({
         timeout: 3000,
       });
     }
-  }, [t, worktree.path]);
+  }, [displayWorktreePath, t]);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
