@@ -1,4 +1,3 @@
-import type { RemoteWindowSession } from '@shared/types';
 import { getDisplayPath, isWslUncPath } from '@shared/utils/path';
 import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
 import {
@@ -49,7 +48,6 @@ import { useI18n } from '@/i18n';
 import { heightVariants, springFast, springStandard } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
-import { RemoteHostSidebarCard } from '../remote/RemoteHostSidebarCard';
 import { RunningProjectsPopover } from './RunningProjectsPopover';
 
 interface Repository {
@@ -61,7 +59,7 @@ interface Repository {
 interface RepositorySidebarProps {
   repositories: Repository[];
   selectedRepo: string | null;
-  onSelectRepo: (repoPath: string) => void;
+  onSelectRepo: (repoPath: string, options?: { activateRemote?: boolean }) => void;
   onAddRepository: () => void;
   onRemoveRepository?: (repoPath: string) => void;
   onReorderRepositories?: (fromIndex: number, toIndex: number) => void;
@@ -83,10 +81,6 @@ interface RepositorySidebarProps {
   isFileDragOver?: boolean;
   temporaryWorkspaceEnabled?: boolean;
   tempBasePath?: string;
-  remoteSession?: RemoteWindowSession | null;
-  onConnectRemoteHost?: () => void;
-  onSwitchRemoteHost?: () => void;
-  onDisconnectRemoteHost?: () => void;
 }
 
 export function RepositorySidebar({
@@ -113,10 +107,6 @@ export function RepositorySidebar({
   isFileDragOver,
   temporaryWorkspaceEnabled = false,
   tempBasePath = '',
-  remoteSession = null,
-  onConnectRemoteHost,
-  onSwitchRemoteHost,
-  onDisconnectRemoteHost,
 }: RepositorySidebarProps) {
   const { t, tNode } = useI18n();
   const _settingsDisplayMode = useSettingsStore((s) => s.settingsDisplayMode);
@@ -338,7 +328,7 @@ export function RepositorySidebar({
           onDragOver={(e) => handleDragOver(e, originalIndex, sectionGroupId)}
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, originalIndex, sectionGroupId)}
-          onClick={() => onSelectRepo(repo.path)}
+          onClick={() => onSelectRepo(repo.path, { activateRemote: true })}
           onContextMenu={(e) => handleContextMenu(e, repo)}
           className={cn(
             'group relative flex w-full flex-col items-start gap-1 rounded-lg p-3 text-left transition-colors',
@@ -416,17 +406,7 @@ export function RepositorySidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-between gap-2 border-b px-3 drag-region">
-        <div className="min-w-0">
-          {onConnectRemoteHost && (
-            <RemoteHostSidebarCard
-              remoteSession={remoteSession}
-              onConnect={onConnectRemoteHost}
-              onSwitchHost={remoteSession ? onSwitchRemoteHost : undefined}
-              onDisconnect={remoteSession ? onDisconnectRemoteHost : undefined}
-            />
-          )}
-        </div>
+      <div className="flex h-12 items-center justify-end gap-2 border-b px-3 drag-region">
         <div className="flex items-center gap-1">
           {onSwitchWorktreeByPath && (
             <RunningProjectsPopover

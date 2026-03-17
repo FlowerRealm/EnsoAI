@@ -1,4 +1,3 @@
-export type { AddRepositoryDialogVariant } from './AddRepositoryDialog';
 export { AddRepositoryDialog } from './AddRepositoryDialog';
 export { BranchSelector } from './BranchSelector';
 export { CommitForm } from './CommitForm';

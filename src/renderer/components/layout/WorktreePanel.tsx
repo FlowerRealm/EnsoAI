@@ -50,6 +50,7 @@ interface WorktreePanelProps {
   activeWorktree: GitWorktree | null;
   branches: GitBranchType[];
   projectName: string;
+  inactiveRemote?: boolean;
   isLoading?: boolean;
   isCreating?: boolean;
   error?: string | null;
@@ -75,6 +76,7 @@ export function WorktreePanel({
   activeWorktree,
   branches,
   projectName,
+  inactiveRemote = false,
   isLoading,
   isCreating,
   error,
@@ -225,6 +227,7 @@ export function WorktreePanel({
           className="flex h-8 w-8 items-center justify-center rounded-md no-drag text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
           onClick={onRefresh}
           title={t('Refresh')}
+          disabled={inactiveRemote}
         >
           <RefreshCw className="h-4 w-4" />
         </button>
@@ -257,7 +260,21 @@ export function WorktreePanel({
 
       {/* Worktree List */}
       <div className="flex-1 overflow-auto p-2">
-        {error ? (
+        {inactiveRemote ? (
+          <Empty className="h-full border-0">
+            <EmptyMedia variant="icon">
+              <GitBranch className="h-4.5 w-4.5" />
+            </EmptyMedia>
+            <EmptyHeader>
+              <EmptyTitle className="text-base">
+                {t('Remote repository is not connected yet')}
+              </EmptyTitle>
+              <EmptyDescription>
+                {t('Click the selected repository again to connect and load worktrees.')}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : error ? (
           <Empty className="h-full border-0">
             <EmptyMedia variant="icon">
               <GitBranch className="h-4.5 w-4.5" />

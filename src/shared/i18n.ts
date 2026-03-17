@@ -110,6 +110,8 @@ export const zhTranslations: Record<string, string> = {
   'Use Option key as Meta instead of composing special characters':
     '将 Option 键作为 Meta 键使用，而非输入特殊字符（如 π）',
   'Click to load worktrees': '点击加载 worktrees',
+  'Click the selected repository again to connect and load worktrees.':
+    '再次点击当前仓库以连接并加载 worktree。',
   Close: '关闭',
   'Close Session': '关闭 Session',
   'Close Tab': '关闭标签',
@@ -303,6 +305,7 @@ export const zhTranslations: Record<string, string> = {
   'Open in IDE': '在 IDE 中打开',
   'Open in {{app}}': '在 {{app}} 打开',
   'Open settings': '打开设置',
+  'Remote repository is not connected yet': '远程仓库尚未连接',
   'Open terminal': '在终端中打开',
   'Open with': '打开方式',
   'Open folder': '打开文件夹',

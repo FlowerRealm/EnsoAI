@@ -4,6 +4,10 @@ import { normalizePath } from '@/App/storage';
 import { useRepositoryStore } from '@/stores/repository';
 import { useShouldPoll } from './useWindowFocus';
 
+interface GitQueryOptions {
+  enabled?: boolean;
+}
+
 export function useGitStatus(workdir: string | null, isActive = true) {
   const setStatus = useRepositoryStore((s) => s.setStatus);
   const shouldPoll = useShouldPoll();
@@ -26,9 +30,10 @@ export function useGitStatus(workdir: string | null, isActive = true) {
   });
 }
 
-export function useGitBranches(workdir: string | null) {
+export function useGitBranches(workdir: string | null, options?: GitQueryOptions) {
   const setBranches = useRepositoryStore((s) => s.setBranches);
   const normalizedWorkdir = workdir ? normalizePath(workdir) : null;
+  const queryEnabled = options?.enabled ?? true;
 
   return useQuery({
     queryKey: ['git', 'branches', normalizedWorkdir],
@@ -38,7 +43,7 @@ export function useGitBranches(workdir: string | null) {
       setBranches(branches);
       return branches;
     },
-    enabled: !!workdir,
+    enabled: !!workdir && queryEnabled,
   });
 }
 

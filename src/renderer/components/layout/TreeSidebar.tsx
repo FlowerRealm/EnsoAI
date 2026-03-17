@@ -1,7 +1,6 @@
 import type {
   GitBranch as GitBranchType,
   GitWorktree,
-  RemoteWindowSession,
   TempWorkspaceItem,
   WorktreeCreateOptions,
 } from '@shared/types';
@@ -87,7 +86,6 @@ import { heightVariants, springFast, springStandard } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
 import { useWorktreeActivityStore } from '@/stores/worktreeActivity';
-import { RemoteHostSidebarCard } from '../remote/RemoteHostSidebarCard';
 import { RunningProjectsPopover } from './RunningProjectsPopover';
 
 interface TreeSidebarProps {
@@ -99,7 +97,9 @@ interface TreeSidebarProps {
   isLoading?: boolean;
   isCreating?: boolean;
   error?: string | null;
-  onSelectRepo: (repoPath: string) => void;
+  onSelectRepo: (repoPath: string, options?: { activateRemote?: boolean }) => void;
+  canLoadRepo: (repoPath: string) => boolean;
+  onActivateRemoteRepo: (repoPath: string) => void;
   onSelectWorktree: (worktree: GitWorktree) => void;
   onAddRepository: () => void;
   onRemoveRepository?: (repoPath: string) => void;
@@ -138,10 +138,6 @@ interface TreeSidebarProps {
   toggleSelectedRepoExpandedRef?: React.MutableRefObject<(() => void) | null>;
   /** Whether a file is being dragged over the sidebar (from App.tsx global handler) */
   isFileDragOver?: boolean;
-  remoteSession?: RemoteWindowSession | null;
-  onConnectRemoteHost?: () => void;
-  onSwitchRemoteHost?: () => void;
-  onDisconnectRemoteHost?: () => void;
 }
 
 export function TreeSidebar({
@@ -154,6 +150,8 @@ export function TreeSidebar({
   isCreating,
   error: _error,
   onSelectRepo,
+  canLoadRepo,
+  onActivateRemoteRepo,
   onSelectWorktree,
   onAddRepository,
   onRemoveRepository,
@@ -187,10 +185,6 @@ export function TreeSidebar({
   onRequestTempDelete,
   toggleSelectedRepoExpandedRef,
   isFileDragOver,
-  remoteSession = null,
-  onConnectRemoteHost,
-  onSwitchRemoteHost,
-  onDisconnectRemoteHost,
 }: TreeSidebarProps) {
   const { t, tNode } = useI18n();
   const _settingsDisplayMode = useSettingsStore((s) => s.settingsDisplayMode);
@@ -236,7 +230,12 @@ export function TreeSidebar({
     errorsMap,
     loadingMap,
     refetchAll: refetchExpandedWorktrees,
-  } = useWorktreeListMultiple(expandedRepoList);
+  } = useWorktreeListMultiple(
+    expandedRepoList.map((repoPath) => ({
+      repoPath,
+      enabled: canLoadRepo(repoPath),
+    }))
+  );
 
   // Repository context menu
   const [repoMenuOpen, setRepoMenuOpen] = useState(false);
@@ -345,22 +344,33 @@ export function TreeSidebar({
         return;
       }
       // Skip auto-expand if user explicitly clicked the tree
-      if (!skipAutoExpandRef.current && !expandedRepos.has(selectedRepo)) {
+      if (
+        !skipAutoExpandRef.current &&
+        !expandedRepos.has(selectedRepo) &&
+        canLoadRepo(selectedRepo)
+      ) {
         setExpandedRepoList((prev) => [...prev, selectedRepo]);
       }
       skipAutoExpandRef.current = false;
     }
     prevSelectedRepoRef.current = selectedRepo;
-  }, [selectedRepo, expandedRepos]);
+  }, [selectedRepo, expandedRepos, canLoadRepo]);
 
-  const toggleRepoExpanded = useCallback((repoPath: string) => {
-    setExpandedRepoList((prev) => {
-      if (prev.includes(repoPath)) {
-        return prev.filter((p) => p !== repoPath);
+  const toggleRepoExpanded = useCallback(
+    (repoPath: string) => {
+      const isExpanded = expandedRepos.has(repoPath);
+      if (!isExpanded) {
+        onActivateRemoteRepo(repoPath);
       }
-      return [...prev, repoPath];
-    });
-  }, []);
+      setExpandedRepoList((prev) => {
+        if (isExpanded) {
+          return prev.filter((p) => p !== repoPath);
+        }
+        return [...prev, repoPath];
+      });
+    },
+    [expandedRepos, onActivateRemoteRepo]
+  );
 
   // Expose toggle function for selected repo via ref
   useEffect(() => {
@@ -665,9 +675,12 @@ export function TreeSidebar({
   const renderRepoItem = (repo: Repository, originalIndex: number, sectionGroupId?: string) => {
     const isSelected = selectedRepo === repo.path;
     const isExpanded = expandedRepos.has(repo.path);
+    const repoCanLoad = canLoadRepo(repo.path);
     const repoWorktrees = getFilteredWorktrees(repo.path);
     const repoError = errorsMap[repo.path];
-    const repoLoading = loadingMap[repo.path] ?? (isExpanded && !worktreesMap[repo.path]);
+    const repoLoading = repoCanLoad
+      ? (loadingMap[repo.path] ?? (isExpanded && !worktreesMap[repo.path]))
+      : false;
     const repoWts = worktreesMap[repo.path] || [];
     const repoMainWorktree = repoWts.find((wt) => wt.isMainWorktree);
     const workdir = repoMainWorktree?.path || repo.path;
@@ -738,7 +751,7 @@ export function TreeSidebar({
               </span>
 
               {/* Create Worktree Button */}
-              {isSelected ? (
+              {isSelected && repoCanLoad ? (
                 <CreateWorktreeDialog
                   branches={branches}
                   projectName={repo.name}
@@ -770,7 +783,7 @@ export function TreeSidebar({
                     e.stopPropagation();
                     e.currentTarget.blur();
                     setRepoMenuTarget(repo);
-                    onSelectRepo(repo.path);
+                    onSelectRepo(repo.path, { activateRemote: true });
                     setPendingCreateWorktree(true);
                   }}
                   title={t('New Worktree')}
@@ -823,7 +836,11 @@ export function TreeSidebar({
               transition={{ duration: 0.2, ease: 'easeInOut' }}
               className="ml-2 mr-2 mt-1 flex flex-col gap-y-0.5 overflow-hidden"
             >
-              {repoError ? (
+              {!repoCanLoad ? (
+                <div className="py-2 px-2 text-xs text-muted-foreground">
+                  {t('Click to load worktrees')}
+                </div>
+              ) : repoError ? (
                 <div className="py-2 px-2 text-xs text-muted-foreground flex flex-col items-center gap-1.5">
                   <span className="text-destructive">{t('Not a Git repository')}</span>
                   {onInitGit && isSelected && (
@@ -863,7 +880,7 @@ export function TreeSidebar({
                     isActive={activeWorktree?.path === worktree.path}
                     onClick={() => {
                       if (!isSelected) {
-                        onSelectRepo(repo.path);
+                        onSelectRepo(repo.path, { activateRemote: true });
                       }
                       onSelectWorktree(worktree);
                     }}
@@ -902,17 +919,7 @@ export function TreeSidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-between gap-2 border-b px-3 drag-region">
-        <div className="min-w-0">
-          {onConnectRemoteHost && (
-            <RemoteHostSidebarCard
-              remoteSession={remoteSession}
-              onConnect={onConnectRemoteHost}
-              onSwitchHost={remoteSession ? onSwitchRemoteHost : undefined}
-              onDisconnect={remoteSession ? onDisconnectRemoteHost : undefined}
-            />
-          )}
-        </div>
+      <div className="flex h-12 items-center justify-end gap-2 border-b px-3 drag-region">
         <div className="flex items-center gap-1">
           {/* Manage repositories button */}
           <button
@@ -1216,8 +1223,11 @@ export function TreeSidebar({
               onClick={() => {
                 setRepoMenuOpen(false);
                 // Switch to the right-clicked repo first, then wait for state update
-                if (repoMenuTarget && repoMenuTarget.path !== selectedRepo) {
-                  onSelectRepo(repoMenuTarget.path);
+                if (
+                  repoMenuTarget &&
+                  (repoMenuTarget.path !== selectedRepo || !canLoadRepo(repoMenuTarget.path))
+                ) {
+                  onSelectRepo(repoMenuTarget.path, { activateRemote: true });
                   setPendingCreateWorktree(true);
                 } else {
                   // Already on target repo, trigger refresh and open dialog

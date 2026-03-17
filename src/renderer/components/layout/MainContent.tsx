@@ -235,22 +235,20 @@ export function MainContent({
   const isMac = window.electronAPI.env.platform === 'darwin';
   const needsTrafficLightPadding = isMac && repositoryCollapsed && worktreeCollapsed;
 
-  // Remember last valid repoPath and worktreePath to keep AgentPanel mounted
-  // This prevents agent terminals from being destroyed when switching repos
-  const lastValidRepoPathRef = useRef<string | null>(null);
-  const lastValidWorktreePathRef = useRef<string | null>(null);
+  // Remember the last valid repo/worktree pair to keep AgentPanel mounted
+  // without mixing a new repoPath with an old worktreePath.
+  const lastValidContextRef = useRef<{ repoPath: string; worktreePath: string } | null>(null);
 
-  // Update refs when we have valid values
   useEffect(() => {
     if (repoPath && worktreePath) {
-      lastValidRepoPathRef.current = repoPath;
-      lastValidWorktreePathRef.current = worktreePath;
+      lastValidContextRef.current = { repoPath, worktreePath };
     }
   }, [repoPath, worktreePath]);
 
-  // Use current values if available, otherwise use last valid values
-  const effectiveRepoPath = repoPath || lastValidRepoPathRef.current;
-  const effectiveWorktreePath = worktreePath || lastValidWorktreePathRef.current;
+  const effectiveRepoPath =
+    repoPath && worktreePath ? repoPath : (lastValidContextRef.current?.repoPath ?? null);
+  const effectiveWorktreePath =
+    repoPath && worktreePath ? worktreePath : (lastValidContextRef.current?.worktreePath ?? null);
 
   // Check if we have a currently selected worktree
   const hasActiveWorktree = Boolean(repoPath && worktreePath);
@@ -555,7 +553,6 @@ export function MainContent({
             )}
           >
             <TodoPanel
-              repoPath={repoPath}
               worktreePath={worktreePath}
               isActive={activeTab === 'todo'}
               onSwitchToAgent={() => onTabChange('chat')}
