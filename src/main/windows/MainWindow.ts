@@ -3,18 +3,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { is } from '@electron-toolkit/utils';
 import { translate } from '@shared/i18n';
-import type {
-  AppCloseRequestPayload,
-  AppCloseRequestReason,
-  WindowBootstrapContext,
-} from '@shared/types';
+import type { AppCloseRequestPayload, AppCloseRequestReason } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
 import { getCurrentLocale } from '../services/i18n';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
 import { sessionManager } from '../services/session/SessionManager';
 import { autoUpdaterService } from '../services/updater/AutoUpdater';
-import { windowContextManager } from './WindowContext';
 
 /** Default macOS traffic lights position (matches BrowserWindow trafficLightPosition) */
 const TRAFFIC_LIGHTS_DEFAULT_POSITION = { x: 16, y: 16 };
@@ -72,7 +66,6 @@ function saveWindowState(win: BrowserWindow): void {
 }
 
 interface CreateMainWindowOptions {
-  context?: WindowBootstrapContext;
   initializeWindow?: (window: BrowserWindow) => Promise<void> | void;
   partition?: string;
   replaceWindow?: BrowserWindow | null;
@@ -142,7 +135,6 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
     },
   });
 
-  windowContextManager.registerWindow(win, options.context ?? { mode: 'local' });
   void options.initializeWindow?.(win);
 
   // Enable native context menu for editable fields (input/textarea/contenteditable)
@@ -388,7 +380,6 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
 
   win.on('closed', () => {
     void sessionManager.detachWindowSessions(win.id);
-    void remoteSessionManager.closeSessionForClosedWindow(win.id);
   });
 
   return win;

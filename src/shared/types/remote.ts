@@ -1,6 +1,4 @@
 export type WorkspaceKind = 'local' | 'remote';
-export type WindowMode = 'local' | 'remote-host';
-export type RemoteWindowOpenTarget = 'current-window' | 'new-window';
 
 export type WorkspacePlatform = 'linux' | 'darwin' | 'win32';
 export type RemotePlatform = 'linux';
@@ -166,30 +164,3 @@ export interface SessionStorageDocument {
   localStorage: Record<string, string>;
   todos: Record<string, SessionTodoTask[]>;
 }
-
-export interface RemoteWindowSession {
-  sessionId: string;
-  connectionId: string;
-  profileId: string;
-  profileName: string;
-  sshTarget: string;
-  platform: RemotePlatform;
-  remoteHomeDir: string;
-  storagePath: string;
-}
-
-export interface RemoteSessionState {
-  session: RemoteWindowSession;
-  storage: SessionStorageDocument;
-}
-
-export interface LocalWindowBootstrapContext {
-  mode: 'local';
-}
-
-export interface RemoteHostWindowBootstrapContext {
-  mode: 'remote-host';
-  session: RemoteWindowSession;
-}
-
-export type WindowBootstrapContext = LocalWindowBootstrapContext | RemoteHostWindowBootstrapContext;

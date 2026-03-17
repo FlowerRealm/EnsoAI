@@ -10,6 +10,7 @@ export * from './mcp';
 export * from './plugins';
 export * from './prompts';
 export * from './remote';
+export * from './repositoryContext';
 export * from './search';
 export * from './session';
 export * from './shell';

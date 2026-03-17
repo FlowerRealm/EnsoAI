@@ -1,4 +1,4 @@
-import type { ClaudeProvider, ClaudeSettings } from '@shared/types';
+import type { ClaudeProvider } from '@shared/types';
 import { IPC_CHANNELS } from '@shared/types';
 import { type BrowserWindow, ipcMain } from 'electron';
 import {
@@ -10,16 +10,18 @@ import {
   unwatchClaudeSettings,
   watchClaudeSettings,
 } from '../services/claude/ClaudeProviderManager';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
+import {
+  readRepositoryClaudeSettings,
+  writeRepositoryClaudeSettings,
+} from '../services/remote/RemoteEnvironmentService';
+import { resolveRepositoryRuntimeContext } from '../services/repository/RepositoryContextResolver';
 
 export function registerClaudeProviderHandlers(): void {
   // 读取当前 Claude settings
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_READ_SETTINGS, async (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const settings = await remoteSessionManager.readRemoteJsonFile<ClaudeSettings>(
-        event.sender,
-        remoteSessionManager.getClaudeSettingsPath(event.sender)
-      );
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_READ_SETTINGS, async (_, repoPath?: string) => {
+    const context = resolveRepositoryRuntimeContext(repoPath);
+    if (context.kind === 'remote') {
+      const settings = await readRepositoryClaudeSettings(repoPath);
       const extracted = extractProviderFromClaudeSettings(settings);
       return { settings, extracted };
     }
@@ -30,21 +32,20 @@ export function registerClaudeProviderHandlers(): void {
   });
 
   // 应用 Provider 配置
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROVIDER_APPLY, async (event, provider: ClaudeProvider) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const settings =
-        (await remoteSessionManager.readRemoteJsonFile<ClaudeSettings>(
-          event.sender,
-          remoteSessionManager.getClaudeSettingsPath(event.sender)
-        )) ?? {};
-      return remoteSessionManager.writeRemoteJsonFile(
-        event.sender,
-        remoteSessionManager.getClaudeSettingsPath(event.sender),
-        applyProviderToClaudeSettings(settings, provider)
-      );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PROVIDER_APPLY,
+    async (_, repoPath: string | undefined, provider: ClaudeProvider) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote') {
+        const settings = (await readRepositoryClaudeSettings(repoPath)) ?? {};
+        return writeRepositoryClaudeSettings(
+          repoPath,
+          applyProviderToClaudeSettings(settings, provider)
+        );
+      }
+      return applyProvider(provider);
     }
-    return applyProvider(provider);
-  });
+  );
 }
 
 // Keep a reference to the window for dynamic watcher toggling

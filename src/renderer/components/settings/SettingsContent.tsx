@@ -29,12 +29,14 @@ interface SettingsContentProps {
   activeCategory?: SettingsCategory;
   onCategoryChange?: (category: SettingsCategory) => void;
   scrollToProvider?: boolean;
+  repoPath?: string;
 }
 
 export function SettingsContent({
   activeCategory: controlledCategory,
   onCategoryChange,
   scrollToProvider,
+  repoPath,
 }: SettingsContentProps) {
   const { t } = useI18n();
 
@@ -91,12 +93,12 @@ export function SettingsContent({
         {activeCategory === 'appearance' && <AppearanceSettings />}
         {activeCategory === 'editor' && <EditorSettings />}
         {activeCategory === 'keybindings' && <KeybindingsSettings />}
-        {activeCategory === 'agent' && <AgentSettings />}
+        {activeCategory === 'agent' && <AgentSettings repoPath={repoPath} />}
         {activeCategory === 'ai' && <AISettings />}
         {activeCategory === 'integration' && (
-          <IntegrationSettings scrollToProvider={scrollToProvider} />
+          <IntegrationSettings repoPath={repoPath} scrollToProvider={scrollToProvider} />
         )}
-        {activeCategory === 'hapi' && <HapiSettings />}
+        {activeCategory === 'hapi' && <HapiSettings repoPath={repoPath} />}
         {activeCategory === 'remote' && <RemoteSettings />}
         {activeCategory === 'webInspector' && <WebInspectorSettings />}
       </div>

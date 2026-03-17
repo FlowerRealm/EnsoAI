@@ -16,8 +16,6 @@ export interface TodoTaskRow {
   updated_at: number;
 }
 
-type DbCallback<T> = (err: Error | null, result: T) => void;
-
 function getDbPath(): string {
   return join(app.getPath('userData'), 'todo.db');
 }

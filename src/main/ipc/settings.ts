@@ -1,6 +1,5 @@
 import { IPC_CHANNELS } from '@shared/types';
 import { app, ipcMain } from 'electron';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
 import {
   readSharedSettings,
   writeSharedSettings,
@@ -70,20 +69,13 @@ export function flushSettings(): boolean {
 }
 
 export function registerSettingsHandlers(): void {
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_READ, async (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return remoteSessionManager.readSettingsData(event.sender);
-    }
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_READ, async () => {
     return readSettings();
   });
 
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_WRITE, async (event, data: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_WRITE, async (_, data: unknown) => {
     try {
       const newData = data as Record<string, unknown>;
-
-      if (remoteSessionManager.hasSession(event.sender)) {
-        return remoteSessionManager.writeSettingsData(event.sender, newData);
-      }
 
       // Detect enableProviderWatcher change and toggle watcher accordingly
       const oldEnabled = (cachedSettings?.claudeCodeIntegration as Record<string, unknown>)

@@ -3,7 +3,6 @@ import log from 'electron-log/renderer.js';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ToastProvider } from './components/ui/toast';
-import { bootstrapRemoteSessionState } from './session/bootstrap';
 import './styles/globals.css';
 
 // Initialize renderer logging with conservative defaults
@@ -21,8 +20,6 @@ const queryClient = new QueryClient({
 });
 
 async function startApp(): Promise<void> {
-  await bootstrapRemoteSessionState();
-
   const root = document.getElementById('root');
   if (!root) {
     return;

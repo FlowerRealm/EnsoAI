@@ -1,6 +1,5 @@
 import { normalizeLocale } from '@shared/i18n';
 import type { ProxySettings } from '@shared/types';
-import { getBootstrappedRemoteSession } from '@/session/bootstrap';
 import type {
   AgentDetectionStatus,
   AgentSettings,
@@ -396,8 +395,7 @@ export function getDefaultLocale(): import('@shared/i18n').Locale {
  * Get default shell config based on platform
  */
 export function getDefaultShellConfig(): import('@shared/types').ShellConfig {
-  const remoteSession = typeof window !== 'undefined' ? getBootstrappedRemoteSession() : null;
-  const executionPlatform = remoteSession?.platform ?? window.electronAPI?.env?.platform;
+  const executionPlatform = window.electronAPI?.env?.platform;
   return {
     // Use PowerShell 5.x as default on Windows (always available)
     // PowerShell 7 (pwsh.exe) requires separate installation

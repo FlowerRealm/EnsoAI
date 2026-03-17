@@ -69,8 +69,10 @@ export function TaskCard({
     const handleClick = (e: MouseEvent) => {
       const target = e.target as Node;
       if (
-        menuRef.current && !menuRef.current.contains(target) &&
-        portalRef.current && !portalRef.current.contains(target)
+        menuRef.current &&
+        !menuRef.current.contains(target) &&
+        portalRef.current &&
+        !portalRef.current.contains(target)
       ) {
         setShowAgentMenu(false);
       }

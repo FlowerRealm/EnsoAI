@@ -1,8 +1,6 @@
 import { type ConnectionProfile, IPC_CHANNELS, type RemoteAuthResponse } from '@shared/types';
 import { ipcMain } from 'electron';
 import { remoteConnectionManager } from '../services/remote/RemoteConnectionManager';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
-import { disconnectRemoteWindow, openRemoteHostWindow } from '../windows/WindowManager';
 
 export function registerRemoteHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.REMOTE_PROFILE_LIST, async () => {
@@ -41,37 +39,6 @@ export function registerRemoteHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.REMOTE_GET_STATUS, async (_, connectionId: string) => {
     return remoteConnectionManager.getStatus(connectionId);
   });
-
-  ipcMain.handle(
-    IPC_CHANNELS.REMOTE_SESSION_OPEN,
-    async (
-      event,
-      payload: { profileOrId: string | ConnectionProfile; target: 'current-window' | 'new-window' }
-    ) => {
-      const nextWindow = await openRemoteHostWindow({
-        profileOrId: payload.profileOrId,
-        target: payload.target,
-        sourceWindow: event.sender,
-      });
-      return Boolean(nextWindow);
-    }
-  );
-
-  ipcMain.handle(IPC_CHANNELS.REMOTE_SESSION_CLOSE, async (event) => {
-    return Boolean(await disconnectRemoteWindow(event.sender));
-  });
-
-  ipcMain.handle(IPC_CHANNELS.REMOTE_SESSION_GET, async (event) => {
-    return remoteSessionManager.getSessionState(event.sender);
-  });
-
-  ipcMain.handle(
-    IPC_CHANNELS.REMOTE_SESSION_SYNC_LOCAL_STORAGE,
-    async (event, snapshot: Record<string, string>) => {
-      await remoteSessionManager.syncLocalStorage(event.sender, snapshot);
-      return true;
-    }
-  );
 
   ipcMain.handle(
     IPC_CHANNELS.REMOTE_DIRECTORY_LIST,

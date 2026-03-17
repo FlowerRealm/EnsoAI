@@ -11,7 +11,11 @@ import {
   startClaudeSlashCompletionsWatcher,
   stopClaudeSlashCompletionsWatcher,
 } from '../services/claude/ClaudeCompletionsManager';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
+import {
+  getRepositoryEnvironmentContext,
+  listRepositoryRemoteDirectory,
+} from '../services/remote/RemoteEnvironmentService';
+import { resolveRepositoryRuntimeContext } from '../services/repository/RepositoryContextResolver';
 
 function parseMarkdownHeading(content: string): string | undefined {
   for (const line of content.split(/\r?\n/)) {
@@ -74,10 +78,7 @@ function uniqueItems(items: ClaudeSlashCompletionItem[]): ClaudeSlashCompletionI
   });
 }
 
-async function walkRemoteSkillFiles(
-  sender: Electron.WebContents,
-  rootPath: string
-): Promise<string[]> {
+async function walkRemoteSkillFiles(repoPath: string, rootPath: string): Promise<string[]> {
   const stack = [rootPath];
   const files: string[] = [];
 
@@ -87,7 +88,7 @@ async function walkRemoteSkillFiles(
       break;
     }
 
-    const entries = await remoteSessionManager.listRemoteDirectory(sender, current);
+    const entries = await listRepositoryRemoteDirectory(repoPath, current);
     for (const entry of entries) {
       if (entry.isDirectory) {
         stack.push(entry.path);
@@ -103,22 +104,23 @@ async function walkRemoteSkillFiles(
 }
 
 async function getRemoteClaudeSlashCompletionsSnapshot(
-  sender: Electron.WebContents
+  repoPath: string
 ): Promise<ClaudeSlashCompletionsSnapshot> {
   const localSnapshot = await refreshClaudeSlashCompletions();
   const builtinItems = localSnapshot.items.filter((item) => item.source === 'builtin');
   const userItems: ClaudeSlashCompletionItem[] = [];
+  const context = await getRepositoryEnvironmentContext(repoPath);
+  if (context.kind !== 'remote') {
+    return localSnapshot;
+  }
 
-  const commandEntries = await remoteSessionManager.listRemoteDirectory(
-    sender,
-    remoteSessionManager.getClaudeCommandsDir(sender)
-  );
+  const commandEntries = await listRepositoryRemoteDirectory(repoPath, context.claudeCommandsDir);
   for (const entry of commandEntries) {
     if (entry.isDirectory || !entry.name.toLowerCase().endsWith('.md')) {
       continue;
     }
     const commandName = entry.name.slice(0, -3);
-    const content = await remoteSessionManager.readRemoteTextFile(sender, entry.path);
+    const content = await readRepositoryRemoteTextFile(repoPath, entry.path);
     userItems.push({
       kind: 'command',
       label: `/${commandName}`,
@@ -128,12 +130,9 @@ async function getRemoteClaudeSlashCompletionsSnapshot(
     });
   }
 
-  const skillFiles = await walkRemoteSkillFiles(
-    sender,
-    remoteSessionManager.getClaudeSkillsDir(sender)
-  );
+  const skillFiles = await walkRemoteSkillFiles(repoPath, context.claudeSkillsDir);
   for (const filePath of skillFiles) {
-    const content = await remoteSessionManager.readRemoteTextFile(sender, filePath);
+    const content = await readRepositoryRemoteTextFile(repoPath, filePath);
     if (!content) {
       continue;
     }
@@ -156,6 +155,31 @@ async function getRemoteClaudeSlashCompletionsSnapshot(
   };
 }
 
+async function readRepositoryRemoteTextFile(
+  repoPath: string,
+  remotePath: string
+): Promise<string | null> {
+  const context = await getRepositoryEnvironmentContext(repoPath);
+  if (context.kind !== 'remote') {
+    return null;
+  }
+
+  try {
+    const { remoteConnectionManager } = await import('../services/remote/RemoteConnectionManager');
+    const result = await remoteConnectionManager.call<{ content: string; isBinary?: boolean }>(
+      context.connectionId,
+      'fs:read',
+      { path: remotePath }
+    );
+    if (result.isBinary) {
+      return null;
+    }
+    return result.content;
+  } catch {
+    return null;
+  }
+}
+
 function broadcast(snapshot: ClaudeSlashCompletionsSnapshot): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
@@ -171,26 +195,29 @@ export function registerClaudeCompletionsHandlers(): void {
     console.warn('[ClaudeCompletions] watcher 启动失败：', err);
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_COMPLETIONS_GET, (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return getRemoteClaudeSlashCompletionsSnapshot(event.sender);
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_COMPLETIONS_GET, (_, repoPath?: string) => {
+    if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote' && repoPath) {
+      return getRemoteClaudeSlashCompletionsSnapshot(repoPath);
     }
     return getClaudeSlashCompletionsSnapshot();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_COMPLETIONS_REFRESH, (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return getRemoteClaudeSlashCompletionsSnapshot(event.sender);
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_COMPLETIONS_REFRESH, (_, repoPath?: string) => {
+    if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote' && repoPath) {
+      return getRemoteClaudeSlashCompletionsSnapshot(repoPath);
     }
     return refreshClaudeSlashCompletions();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_COMPLETIONS_LEARN, (event, label: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return false;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_COMPLETIONS_LEARN,
+    (_, repoPath: string | undefined, label: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return false;
+      }
+      return learnClaudeSlashCompletion(label);
     }
-    return learnClaudeSlashCompletion(label);
-  });
+  );
 }
 
 export async function stopClaudeCompletionsWatchers(): Promise<void> {

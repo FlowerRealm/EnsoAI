@@ -5,10 +5,10 @@ import {
   type TerminalSearchBarRef,
 } from '@/components/terminal/TerminalSearchBar';
 import { useFileDrop } from '@/hooks/useFileDrop';
+import { useRepositoryRuntimeContext } from '@/hooks/useRepositoryRuntimeContext';
 import { useTerminalScrollToBottom } from '@/hooks/useTerminalScrollToBottom';
 import { useXterm } from '@/hooks/useXterm';
 import { useI18n } from '@/i18n';
-import { getBootstrappedRemoteSession } from '@/session/bootstrap';
 import { type OutputState, useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -96,9 +96,9 @@ export function AgentTerminal({
     claudeCodeIntegration,
     glowEffectEnabled,
   } = useSettingsStore();
-  const remoteSession = useMemo(() => getBootstrappedRemoteSession(), []);
-  const isRemoteExecution = remoteSession !== null;
-  const executionPlatform = remoteSession?.platform ?? window.electronAPI?.env?.platform;
+  const { data: runtimeContext } = useRepositoryRuntimeContext(cwd);
+  const isRemoteExecution = runtimeContext?.kind === 'remote';
+  const executionPlatform = window.electronAPI?.env?.platform;
 
   // Track if hapi is globally installed (cached in main process)
   const [hapiGlobalInstalled, setHapiGlobalInstalled] = useState<boolean | null>(null);
@@ -115,17 +115,17 @@ export function AgentTerminal({
       setResolvedShell(null);
       return;
     }
-    window.electronAPI.shell.resolveForCommand(shellConfig).then(setResolvedShell);
-  }, [isRemoteExecution, shellConfig]);
+    window.electronAPI.shell.resolveForCommand(cwd, shellConfig).then(setResolvedShell);
+  }, [cwd, isRemoteExecution, shellConfig]);
 
   // Check hapi global installation on mount (only for hapi environment)
   useEffect(() => {
     if (environment === 'hapi') {
-      window.electronAPI.hapi.checkGlobal(false).then((status) => {
+      window.electronAPI.hapi.checkGlobal(cwd, false).then((status) => {
         setHapiGlobalInstalled(status.installed);
       });
     }
-  }, [environment]);
+  }, [cwd, environment]);
   const outputBufferRef = useRef('');
   const startTimeRef = useRef<number | null>(null);
   const hasInitializedRef = useRef(false);
@@ -287,10 +287,10 @@ export function AgentTerminal({
   useEffect(() => {
     return () => {
       if (tmuxSessionNameRef.current) {
-        window.electronAPI.tmux.killSession(tmuxSessionNameRef.current);
+        window.electronAPI.tmux.killSession(cwd, tmuxSessionNameRef.current);
       }
     };
-  }, []);
+  }, [cwd]);
 
   // Build command with session args
   const { command, env, initialCommand } = useMemo(() => {

@@ -4,15 +4,21 @@ import { ipcMain } from 'electron';
 import { cliDetector } from '../services/cli/CliDetector';
 import { cliInstaller } from '../services/cli/CliInstaller';
 import { remoteConnectionManager } from '../services/remote/RemoteConnectionManager';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
+import { resolveRepositoryRuntimeContext } from '../services/repository/RepositoryContextResolver';
 
 export function registerCliHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.CLI_DETECT_ONE,
-    async (event, agentId: string, customAgent?: CustomAgent, customPath?: string) => {
-      const session = remoteSessionManager.getSession(event.sender);
-      if (session) {
-        return await remoteConnectionManager.call(session.connectionId, 'cli:detectOne', {
+    async (
+      _,
+      repoPath: string | undefined,
+      agentId: string,
+      customAgent?: CustomAgent,
+      customPath?: string
+    ) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote' && context.connectionId) {
+        return await remoteConnectionManager.call(context.connectionId, 'cli:detectOne', {
           agentId,
           customAgent,
           customPath,

@@ -150,8 +150,7 @@ export const IPC_CHANNELS = {
   WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE: 'window:setTrafficLightsVisible',
   WINDOW_IS_FULLSCREEN: 'window:isFullScreen',
   WINDOW_FULLSCREEN_CHANGED: 'window:fullScreenChanged',
-  WINDOW_GET_CONTEXT: 'window:getContext',
-
+  WINDOW_GET_REPOSITORY_RUNTIME_CONTEXT: 'window:getRepositoryRuntimeContext',
   // Dialog
   DIALOG_OPEN_DIRECTORY: 'dialog:openDirectory',
   DIALOG_OPEN_FILE: 'dialog:openFile',
@@ -164,10 +163,6 @@ export const IPC_CHANNELS = {
   REMOTE_CONNECT: 'remote:connect',
   REMOTE_DISCONNECT: 'remote:disconnect',
   REMOTE_GET_STATUS: 'remote:getStatus',
-  REMOTE_SESSION_OPEN: 'remote:session:open',
-  REMOTE_SESSION_CLOSE: 'remote:session:close',
-  REMOTE_SESSION_GET: 'remote:session:get',
-  REMOTE_SESSION_SYNC_LOCAL_STORAGE: 'remote:session:syncLocalStorage',
   SESSION_STORAGE_GET: 'sessionStorage:get',
   SESSION_STORAGE_SYNC_LOCAL_STORAGE: 'sessionStorage:syncLocalStorage',
   SESSION_STORAGE_IMPORT_LOCAL_STORAGE: 'sessionStorage:importLocalStorage',

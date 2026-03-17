@@ -20,132 +20,110 @@ import {
   uninstallPlugin,
 } from '../services/claude/PluginsManager';
 import { backupClaudeMd, readClaudeMd, writeClaudeMd } from '../services/claude/PromptsManager';
-import { remoteSessionManager } from '../services/remote/RemoteSessionManager';
-
-async function readRemoteMcpServers(sender: Electron.WebContents) {
-  const data =
-    (await remoteSessionManager.readRemoteJsonFile<{
-      mcpServers?: Record<string, import('@shared/types').McpServerConfig>;
-    }>(sender, remoteSessionManager.getClaudeJsonPath(sender))) ?? {};
-  return data.mcpServers ?? {};
-}
-
-async function writeRemoteMcpServers(
-  sender: Electron.WebContents,
-  nextServers: Record<string, import('@shared/types').McpServerConfig>
-) {
-  const data =
-    (await remoteSessionManager.readRemoteJsonFile<Record<string, unknown>>(
-      sender,
-      remoteSessionManager.getClaudeJsonPath(sender)
-    )) ?? {};
-  return remoteSessionManager.writeRemoteJsonFile(
-    sender,
-    remoteSessionManager.getClaudeJsonPath(sender),
-    {
-      ...data,
-      mcpServers: nextServers,
-    }
-  );
-}
+import {
+  backupRepositoryClaudePrompt,
+  readRepositoryClaudePrompt,
+  readRepositoryRemoteMcpServers,
+  writeRepositoryClaudePrompt,
+  writeRepositoryRemoteMcpServers,
+} from '../services/remote/RemoteEnvironmentService';
+import { resolveRepositoryRuntimeContext } from '../services/repository/RepositoryContextResolver';
 
 export function registerClaudeConfigHandlers(): void {
   // MCP Management
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_MCP_READ, async (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return readRemoteMcpServers(event.sender);
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_MCP_READ, async (_, repoPath?: string) => {
+    const context = resolveRepositoryRuntimeContext(repoPath);
+    if (context.kind === 'remote') {
+      return (await readRepositoryRemoteMcpServers(repoPath)) ?? {};
     }
     return readMcpServers();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_MCP_SYNC, async (event, servers: McpServer[]) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const mcpServers: Record<string, import('@shared/types').McpServerConfig> = {};
-      for (const server of servers) {
-        if (!server.enabled) continue;
-        const config = serverToConfig(server);
-        if (config) {
-          mcpServers[server.id] = config;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_MCP_SYNC,
+    async (_, repoPath: string | undefined, servers: McpServer[]) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote') {
+        const mcpServers: Record<string, import('@shared/types').McpServerConfig> = {};
+        for (const server of servers) {
+          if (!server.enabled) continue;
+          const config = serverToConfig(server);
+          if (config) {
+            mcpServers[server.id] = config;
+          }
         }
+        return writeRepositoryRemoteMcpServers(repoPath, mcpServers);
       }
-      return writeRemoteMcpServers(event.sender, mcpServers);
+      return syncMcpServers(servers);
     }
-    return syncMcpServers(servers);
-  });
+  );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_MCP_UPSERT, async (event, server: McpServer) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const existing = await readRemoteMcpServers(event.sender);
-      const next = { ...existing };
-      if (server.enabled) {
-        const config = serverToConfig(server);
-        if (config) {
-          next[server.id] = config;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_MCP_UPSERT,
+    async (_, repoPath: string | undefined, server: McpServer) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote') {
+        const existing = (await readRepositoryRemoteMcpServers(repoPath)) ?? {};
+        const next = { ...existing };
+        if (server.enabled) {
+          const config = serverToConfig(server);
+          if (config) {
+            next[server.id] = config;
+          }
+        } else {
+          delete next[server.id];
         }
-      } else {
-        delete next[server.id];
+        return writeRepositoryRemoteMcpServers(repoPath, next);
       }
-      return writeRemoteMcpServers(event.sender, next);
+      return upsertMcpServer(server);
     }
-    return upsertMcpServer(server);
-  });
+  );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_MCP_DELETE, async (event, serverId: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const existing = await readRemoteMcpServers(event.sender);
-      const next = { ...existing };
-      delete next[serverId];
-      return writeRemoteMcpServers(event.sender, next);
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_MCP_DELETE,
+    async (_, repoPath: string | undefined, serverId: string) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote') {
+        const existing = (await readRepositoryRemoteMcpServers(repoPath)) ?? {};
+        const next = { ...existing };
+        delete next[serverId];
+        return writeRepositoryRemoteMcpServers(repoPath, next);
+      }
+      return deleteMcpServer(serverId);
     }
-    return deleteMcpServer(serverId);
-  });
+  );
 
   // Prompts Management
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROMPTS_READ, async (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return remoteSessionManager.readRemoteTextFile(
-        event.sender,
-        remoteSessionManager.getClaudePromptPath(event.sender)
-      );
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROMPTS_READ, async (_, repoPath?: string) => {
+    const context = resolveRepositoryRuntimeContext(repoPath);
+    if (context.kind === 'remote') {
+      return readRepositoryClaudePrompt(repoPath);
     }
     return readClaudeMd();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROMPTS_WRITE, async (event, content: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return remoteSessionManager.writeRemoteTextFile(
-        event.sender,
-        remoteSessionManager.getClaudePromptPath(event.sender),
-        content
-      );
-    }
-    return writeClaudeMd(content);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROMPTS_BACKUP, async (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      const content = await remoteSessionManager.readRemoteTextFile(
-        event.sender,
-        remoteSessionManager.getClaudePromptPath(event.sender)
-      );
-      if (content === null) {
-        return null;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PROMPTS_WRITE,
+    async (_, repoPath: string | undefined, content: string) => {
+      const context = resolveRepositoryRuntimeContext(repoPath);
+      if (context.kind === 'remote') {
+        return writeRepositoryClaudePrompt(repoPath, content);
       }
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const backupPath = `${remoteSessionManager.getClaudeConfigDir(event.sender)}/backups/CLAUDE.md.${timestamp}.bak`;
-      const success = await remoteSessionManager.writeRemoteTextFile(
-        event.sender,
-        backupPath,
-        content
-      );
-      return success ? backupPath : null;
+      return writeClaudeMd(content);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PROMPTS_BACKUP, async (_, repoPath?: string) => {
+    const context = resolveRepositoryRuntimeContext(repoPath);
+    if (context.kind === 'remote') {
+      return backupRepositoryClaudePrompt(repoPath);
     }
     return backupClaudeMd();
   });
 
   // Plugins Management
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_LIST, (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_LIST, (_, repoPath?: string) => {
+    if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
       return [];
     }
     return getPlugins();
@@ -153,64 +131,79 @@ export function registerClaudeConfigHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.CLAUDE_PLUGINS_SET_ENABLED,
-    (event, pluginId: string, enabled: boolean) => {
-      if (remoteSessionManager.hasSession(event.sender)) {
+    (_, repoPath: string | undefined, pluginId: string, enabled: boolean) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
         return false;
       }
       return setPluginEnabled(pluginId, enabled);
     }
   );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_AVAILABLE, (event, marketplace?: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return [];
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PLUGINS_AVAILABLE,
+    (_, repoPath: string | undefined, marketplace?: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return [];
+      }
+      return getAvailablePlugins(marketplace);
     }
-    return getAvailablePlugins(marketplace);
-  });
+  );
 
   ipcMain.handle(
     IPC_CHANNELS.CLAUDE_PLUGINS_INSTALL,
-    (event, pluginName: string, marketplace?: string) => {
-      if (remoteSessionManager.hasSession(event.sender)) {
+    (_, repoPath: string | undefined, pluginName: string, marketplace?: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
         return false;
       }
       return installPlugin(pluginName, marketplace);
     }
   );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_UNINSTALL, (event, pluginId: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return false;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PLUGINS_UNINSTALL,
+    (_, repoPath: string | undefined, pluginId: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return false;
+      }
+      return uninstallPlugin(pluginId);
     }
-    return uninstallPlugin(pluginId);
-  });
+  );
 
   // Marketplaces Management
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_LIST, (event) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_LIST, (_, repoPath?: string) => {
+    if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
       return [];
     }
     return getMarketplaces();
   });
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_ADD, (event, repo: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return false;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_ADD,
+    (_, repoPath: string | undefined, repo: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return false;
+      }
+      return addMarketplace(repo);
     }
-    return addMarketplace(repo);
-  });
+  );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_REMOVE, (event, name: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return false;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_REMOVE,
+    (_, repoPath: string | undefined, name: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return false;
+      }
+      return removeMarketplace(name);
     }
-    return removeMarketplace(name);
-  });
+  );
 
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_REFRESH, (event, name?: string) => {
-    if (remoteSessionManager.hasSession(event.sender)) {
-      return false;
+  ipcMain.handle(
+    IPC_CHANNELS.CLAUDE_PLUGINS_MARKETPLACES_REFRESH,
+    (_, repoPath: string | undefined, name?: string) => {
+      if (resolveRepositoryRuntimeContext(repoPath).kind === 'remote') {
+        return false;
+      }
+      return refreshMarketplaces(name);
     }
-    return refreshMarketplaces(name);
-  });
+  );
 }

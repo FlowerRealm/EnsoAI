@@ -1,6 +1,6 @@
 import { IPC_CHANNELS } from '@shared/types';
 import { BrowserWindow, ipcMain } from 'electron';
-import { windowContextManager } from '../windows/WindowContext';
+import { resolveRepositoryRuntimeContext } from '../services/repository/RepositoryContextResolver';
 
 function getTargetWindow(sender: Electron.WebContents): BrowserWindow {
   const window = BrowserWindow.fromWebContents(sender);
@@ -47,8 +47,8 @@ export function registerWindowHandlers(): () => void {
     return getTargetWindow(event.sender).isFullScreen();
   });
 
-  ipcMain.handle(IPC_CHANNELS.WINDOW_GET_CONTEXT, (event) => {
-    return windowContextManager.getWindowContextFromSender(event.sender);
+  ipcMain.handle(IPC_CHANNELS.WINDOW_GET_REPOSITORY_RUNTIME_CONTEXT, (_, repoPath?: string) => {
+    return resolveRepositoryRuntimeContext(repoPath);
   });
 
   return () => {
@@ -59,6 +59,6 @@ export function registerWindowHandlers(): () => void {
     ipcMain.removeHandler(IPC_CHANNELS.WINDOW_OPEN_DEVTOOLS);
     ipcMain.removeHandler(IPC_CHANNELS.WINDOW_SET_TRAFFIC_LIGHTS_VISIBLE);
     ipcMain.removeHandler(IPC_CHANNELS.WINDOW_IS_FULLSCREEN);
-    ipcMain.removeHandler(IPC_CHANNELS.WINDOW_GET_CONTEXT);
+    ipcMain.removeHandler(IPC_CHANNELS.WINDOW_GET_REPOSITORY_RUNTIME_CONTEXT);
   };
 }
