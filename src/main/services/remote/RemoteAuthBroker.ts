@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import net from 'node:net';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type {
   ConnectionProfile,
@@ -75,7 +76,7 @@ function normalizePromptSignature(promptText: string): string {
 }
 
 function getBrokerRoot(): string {
-  return join(process.env.HOME || process.env.USERPROFILE || '.', '.ensoai', 'remote-auth');
+  return join(process.env.HOME || process.env.USERPROFILE || homedir(), '.ensoai', 'remote-auth');
 }
 
 function normalizePromptText(promptText: string): string {

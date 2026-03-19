@@ -2035,7 +2035,7 @@ export class RemoteConnectionManager {
     server: RemoteServerProcess,
     method: string,
     params: Record<string, unknown>,
-    timeoutMs?: number
+    timeoutMs = REMOTE_RPC_TIMEOUT_MS
   ): Promise<T> {
     const id = server.nextRequestId++;
     const payload = JSON.stringify({ id, method, params });
