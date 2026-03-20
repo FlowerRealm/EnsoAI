@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
@@ -35,6 +35,21 @@ interface AskpassArtifacts {
 }
 
 const MAX_PROMPT_MESSAGE_CHARS = 64 * 1024;
+const AUTH_SOCKET_TIMEOUT_MS = 30_000;
+
+function tokensEqual(left: string | undefined, right: string): boolean {
+  if (typeof left !== 'string') {
+    return false;
+  }
+
+  const leftBuffer = Buffer.from(left, 'utf8');
+  const rightBuffer = Buffer.from(right, 'utf8');
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
 
 function classifyPrompt(promptText: string): RemoteAuthPromptKind {
   const normalized = promptText.toLowerCase();
@@ -385,6 +400,7 @@ export class RemoteAuthBroker {
     await mkdir(getBrokerRoot(), { recursive: true });
     this.server = net.createServer((socket) => {
       socket.setEncoding('utf8');
+      socket.setTimeout(AUTH_SOCKET_TIMEOUT_MS);
       let buffer = '';
       let settled = false;
 
@@ -426,7 +442,7 @@ export class RemoteAuthBroker {
             hostPort?: number;
             prompt?: string;
           };
-          if (payload.token !== this.token || !payload.profileId || !payload.prompt) {
+          if (!tokensEqual(payload.token, this.token) || !payload.profileId || !payload.prompt) {
             finish({ ok: false });
             return;
           }
@@ -462,6 +478,13 @@ export class RemoteAuthBroker {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+      });
+
+      socket.on('timeout', () => {
+        finish({
+          ok: false,
+          error: translateRemote('SSH authentication request timed out'),
+        });
       });
     });
 

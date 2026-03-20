@@ -862,7 +862,14 @@ export class SessionManager {
           : channel === 'session:exit'
             ? IPC_CHANNELS.SESSION_EXIT
             : IPC_CHANNELS.SESSION_STATE;
-      window.webContents.send(resolvedChannel, payload);
+      if (window.webContents.isDestroyed()) {
+        continue;
+      }
+      try {
+        window.webContents.send(resolvedChannel, payload);
+      } catch (error) {
+        console.warn('[session] Failed to emit session event to window:', error);
+      }
     }
   }
 

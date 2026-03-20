@@ -348,6 +348,9 @@ function isValidSshTarget(input: string): boolean {
   }
 
   const atIndex = trimmed.lastIndexOf('@');
+  if (atIndex === 0) {
+    return false;
+  }
   const host = atIndex >= 0 ? trimmed.slice(atIndex + 1) : trimmed;
   if (!host || host.startsWith('-') || host.includes('/') || host.includes('\\')) {
     return false;
@@ -831,11 +834,16 @@ export class RemoteConnectionManager {
     return this.deleteRuntime(profileOrId);
   }
 
-  async connect(profileOrId: string | ConnectionProfile): Promise<RemoteConnectionStatus> {
+  async connect(
+    profileOrId: string | ConnectionProfile,
+    options?: { preserveReconnectState?: boolean }
+  ): Promise<RemoteConnectionStatus> {
     const profile = await this.resolveProfile(profileOrId);
     this.intentionalDisconnects.delete(profile.id);
     this.clearReconnectTimer(profile.id);
-    this.reconnectAttempts.delete(profile.id);
+    if (!options?.preserveReconnectState) {
+      this.reconnectAttempts.delete(profile.id);
+    }
     const existing = this.servers.get(profile.id);
     if (existing) {
       return existing.status;
@@ -2086,7 +2094,7 @@ export class RemoteConnectionManager {
     attempt: number
   ): Promise<RemoteConnectionStatus> {
     try {
-      const status = await this.connect(connectionId);
+      const status = await this.connect(connectionId, { preserveReconnectState: true });
       this.reconnectAttempts.delete(connectionId);
       return status;
     } catch (error) {
@@ -2102,6 +2110,7 @@ export class RemoteConnectionManager {
         error: detail || current.error,
         lastDisconnectReason: detail || current.lastDisconnectReason,
       }));
+      this.reconnectPromises.delete(connectionId);
       this.scheduleReconnect(connectionId, detail);
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -2126,6 +2135,7 @@ export class RemoteConnectionManager {
     return new Promise<T>((resolve, reject) => {
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let writeTimeout: ReturnType<typeof setTimeout> | undefined;
 
       const finish = (callback: () => void) => {
         if (settled) {
@@ -2134,6 +2144,9 @@ export class RemoteConnectionManager {
         settled = true;
         if (timeout) {
           clearTimeout(timeout);
+        }
+        if (writeTimeout) {
+          clearTimeout(writeTimeout);
         }
         server.pending.delete(id);
         callback();
@@ -2144,9 +2157,29 @@ export class RemoteConnectionManager {
         reject: (error) => finish(() => reject(error)),
       });
 
+      writeTimeout = setTimeout(
+        () => {
+          finish(() =>
+            reject(
+              createRemoteError(
+                'Remote request write timed out',
+                undefined,
+                `method=${method}; connectionId=${server.connectionId}`
+              )
+            )
+          );
+        },
+        Math.max(timeoutMs, BOOTSTRAP_TIMEOUT_MS)
+      );
+
       server.proc.stdin.write(`${payload}\n`, 'utf8', (error) => {
         if (error) {
           finish(() => reject(error));
+          return;
+        }
+        if (writeTimeout) {
+          clearTimeout(writeTimeout);
+          writeTimeout = undefined;
         }
       });
 
