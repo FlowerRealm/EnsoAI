@@ -19,6 +19,7 @@ import {
   removeStopHook,
 } from './ClaudeHookManager';
 import { MCP_TOOLS } from './mcpTools';
+import { checkTaskCompletion, readLastAssistantMessages } from './sessionLogReader';
 
 interface LockFilePayload {
   pid: number;
@@ -220,7 +221,7 @@ export async function startClaudeIdeBridge(
       req.on('data', (chunk) => {
         body += chunk.toString();
       });
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const data = JSON.parse(body);
           const sessionId = data.session_id;
@@ -317,11 +318,34 @@ export async function startClaudeIdeBridge(
             } else if (data.hook_event_name === 'Stop') {
               // Stop event - agent has finished or been stopped
               console.log(`[ClaudeIdeBridge] → completed (Stop) ${sessionId?.slice(0, 8)}`);
+
+              // Check for task completion marker in session log (async)
+              let taskCompletionStatus: 'completed' | 'unknown' = 'unknown';
+
+              if (data.cwd) {
+                try {
+                  const lastMessages = await readLastAssistantMessages(data.cwd, sessionId, 3);
+                  if (lastMessages.length > 0) {
+                    const result = checkTaskCompletion(lastMessages);
+                    if (result.completed) {
+                      taskCompletionStatus = 'completed';
+                      console.log(`[ClaudeIdeBridge] Task completion marker detected`);
+                    }
+                  }
+                } catch (err) {
+                  console.warn(
+                    '[ClaudeIdeBridge] Failed to read session log for task completion:',
+                    err
+                  );
+                }
+              }
+
               for (const window of BrowserWindow.getAllWindows()) {
                 if (!window.isDestroyed()) {
                   window.webContents.send(IPC_CHANNELS.AGENT_STOP_NOTIFICATION, {
                     sessionId,
                     cwd: data.cwd,
+                    taskCompletionStatus,
                   });
                 }
               }

@@ -121,6 +121,8 @@ export function GeneralSettings() {
     setAgentNotificationEnterDelay,
     autoUpdateEnabled,
     setAutoUpdateEnabled,
+    gitAutoFetchEnabled,
+    setGitAutoFetchEnabled,
     defaultWorktreePath,
     setDefaultWorktreePath,
     proxySettings,
@@ -783,6 +785,17 @@ export function GeneralSettings() {
           <p className="text-xs text-muted-foreground">
             {t('Default directory for new worktrees. Leave empty to use ~/ensoai/workspaces')}
           </p>
+        </div>
+      </div>
+
+      {/* Git Auto Refresh */}
+      <div className="grid grid-cols-[100px_1fr] items-center gap-4">
+        <span className="text-sm font-medium">{t('Git auto refresh')}</span>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-muted-foreground">
+            {t('Automatically fetch and refresh git status')}
+          </p>
+          <Switch checked={gitAutoFetchEnabled} onCheckedChange={setGitAutoFetchEnabled} />
         </div>
       </div>
 

@@ -7,6 +7,7 @@ import type {
   ClaudeCodeIntegrationSettings,
   CodeReviewSettings,
   CommitMessageGeneratorSettings,
+  EditorKeybindings,
   EditorSettings,
   GitCloneSettings,
   GlobalKeybindings,
@@ -321,6 +322,10 @@ export const defaultSourceControlKeybindings: SourceControlKeybindings = {
 export const defaultSearchKeybindings: SearchKeybindings = {
   searchFiles: { key: 'p', meta: true },
   searchContent: { key: 'f', meta: true, shift: true },
+};
+
+export const defaultEditorKeybindings: EditorKeybindings = {
+  gotoSymbol: { key: 'o', meta: true },
 };
 
 export const defaultGlobalKeybindings: GlobalKeybindings = {

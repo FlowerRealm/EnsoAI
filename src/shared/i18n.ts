@@ -643,6 +643,8 @@ export const zhTranslations: Record<string, string> = {
   'File search shortcuts': '文件搜索快捷键',
   'Search files': '搜索文件',
   'Search content': '搜索内容',
+  'Editor shortcuts': '编辑器快捷键',
+  'Show Symbols': '显示符号列表',
   'Select file': '选择文件',
   'Select folder': '选择文件夹',
   'Select a file from the file tree to begin editing': '从左侧文件树中选择文件以开始编辑',
@@ -1391,6 +1393,8 @@ export const zhTranslations: Record<string, string> = {
   optional: '可选',
   // Worktree settings
   'Git worktree save location settings': 'Git Worktree 保存位置设置',
+  'Git auto refresh': 'Git 自动刷新',
+  'Automatically fetch and refresh git status': '自动拉取远程更新并刷新 Git 状态',
   'Default directory for new worktrees. Leave empty to use ~/ensoai/workspaces':
     '新建 Worktree 的默认目录，留空则使用 ~/ensoai/workspaces',
   // Claude Provider
@@ -1631,6 +1635,12 @@ export const zhTranslations: Record<string, string> = {
   'Launch Agent': '启动 Agent',
   'No tasks yet': '暂无任务',
   'Create your first task to get started': '创建第一个任务开始使用',
+  // Auto Execute
+  'Auto Execute': '自动执行',
+  'Executing...': '执行中...',
+  'Queue: {{count}}': '队列: {{count}}',
+  Queue: '队列',
+  '{{count}} more': '还有 {{count}} 个',
   // Git Clone Settings
   'Git Clone': 'Git 克隆',
   'Base directory': '基础目录',

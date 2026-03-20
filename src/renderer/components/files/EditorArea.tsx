@@ -31,12 +31,13 @@ import { useI18n } from '@/i18n';
 import { useActiveSessionId } from '@/stores/agentSessions';
 import type { EditorTab, PendingCursor } from '@/stores/editor';
 import { useEditorStore } from '@/stores/editor';
-import { useSettingsStore } from '@/stores/settings';
+import { type TerminalKeybinding, useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { BreadcrumbTreeMenu } from './BreadcrumbTreeMenu';
 import { CommentForm, useEditorLineComment } from './EditorLineComment';
 import { EditorTabs } from './EditorTabs';
 import { ExternalModificationBanner } from './ExternalModificationBanner';
+import { setupDoubleClickScope } from './editorScopeSelection';
 import { isImageFile, isPdfFile } from './fileIcons';
 import { ImagePreview } from './ImagePreview';
 import { MarkdownPreview } from './MarkdownPreview';
@@ -47,6 +48,65 @@ import { useEditorBlame } from './useEditorBlame';
 import './monacoSetup';
 
 type Monaco = typeof monaco;
+
+// Map from codeToKey() output to Monaco KeyCode property names
+const SPECIAL_KEY_MAP: Record<string, string> = {
+  '[': 'BracketLeft',
+  ']': 'BracketRight',
+  ';': 'Semicolon',
+  "'": 'Quote',
+  '`': 'Backquote',
+  ',': 'Comma',
+  '.': 'Period',
+  '/': 'Slash',
+  '\\': 'Backslash',
+  '-': 'Minus',
+  '=': 'Equal',
+  space: 'Space',
+  enter: 'Enter',
+  escape: 'Escape',
+  tab: 'Tab',
+  backspace: 'Backspace',
+  delete: 'Delete',
+  arrowup: 'UpArrow',
+  arrowdown: 'DownArrow',
+  arrowleft: 'LeftArrow',
+  arrowright: 'RightArrow',
+  home: 'Home',
+  end: 'End',
+  pageup: 'PageUp',
+  pagedown: 'PageDown',
+};
+
+// Convert a TerminalKeybinding to a Monaco editor chord number.
+// Returns 0 if the key cannot be mapped (caller should skip addCommand).
+function bindingToMonacoChord(binding: TerminalKeybinding, m: Monaco): number {
+  let chord = 0;
+  if (binding.ctrl) chord |= m.KeyMod.WinCtrl;
+  if (binding.meta) chord |= m.KeyMod.CtrlCmd;
+  if (binding.shift) chord |= m.KeyMod.Shift;
+  if (binding.alt) chord |= m.KeyMod.Alt;
+
+  const key = binding.key.toLowerCase();
+  if (!key) return 0;
+  let keyCode: number | undefined;
+
+  if (/^[a-z]$/.test(key)) {
+    keyCode = m.KeyCode[`Key${key.toUpperCase()}` as keyof typeof m.KeyCode] as number;
+  } else if (/^f\d+$/.test(key)) {
+    keyCode = m.KeyCode[key.toUpperCase() as keyof typeof m.KeyCode] as number;
+  } else if (/^\d$/.test(key)) {
+    keyCode = m.KeyCode[`Digit${key}` as keyof typeof m.KeyCode] as number;
+  } else {
+    const monacoName = SPECIAL_KEY_MAP[key];
+    if (monacoName) {
+      keyCode = m.KeyCode[monacoName as keyof typeof m.KeyCode] as number;
+    }
+  }
+
+  if (keyCode === undefined || keyCode === 0) return 0;
+  return chord | keyCode;
+}
 
 let latestSelectionText = '';
 
@@ -126,6 +186,7 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   const {
     terminalTheme,
     editorSettings,
+    editorKeybindings,
     claudeCodeIntegration,
     backgroundImageEnabled,
     backgroundOpacity,
@@ -179,6 +240,8 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
   const isImage = isImageFile(activeTabPath);
   const isPdf = isPdfFile(activeTabPath);
   const [previewMode, setPreviewMode] = useState<MarkdownPreviewMode>('off');
+  const previewModeRef = useRef<MarkdownPreviewMode>('off');
+  previewModeRef.current = previewMode;
   const [editorReady, setEditorReady] = useState(false);
   const [previewWidth, setPreviewWidth] = useState(50); // percentage
 
@@ -502,13 +565,6 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
         }
       });
 
-      // Add Ctrl/Cmd+O shortcut: show file structure (go to symbol in file)
-      // Uses editor.action.quickOutline — the correct standalone Monaco action ID
-      // KeyMod.CtrlCmd maps to Cmd on macOS and Ctrl on Windows/Linux
-      editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyO, () => {
-        editor.getAction('editor.action.quickOutline')?.run();
-      });
-
       editor.addCommand(m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyF, () => {
         const selection = editor.getSelection();
         const selectedText =
@@ -557,6 +613,9 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
         },
       });
 
+      // Double-click: select innermost scope (brackets, quotes, indentation)
+      setupDoubleClickScope(editor);
+
       // Restore view state if available
       if (activeTab?.viewState) {
         editor.restoreViewState(activeTab.viewState as monaco.editor.ICodeEditorViewState);
@@ -586,6 +645,11 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
           editor.focus();
         }, 100);
         onClearPendingCursor();
+      } else if (previewModeRef.current !== 'fullscreen') {
+        // Focus editor when opening a file without pending cursor navigation.
+        // Skip when markdown fullscreen preview is active to avoid stealing keyboard focus
+        // from the preview pane.
+        editor.focus();
       }
 
       // Sync scroll from editor to preview (for markdown files)
@@ -618,6 +682,22 @@ export const EditorArea = forwardRef<EditorAreaRef, EditorAreaProps>(function Ed
       t,
     ]
   );
+
+  // Re-register goto-symbol keybinding whenever the user changes it in Settings.
+  // Runs after mount (editorReady=true) and on every keybinding change so the
+  // new chord takes effect immediately without requiring a tab switch.
+  useEffect(() => {
+    const editor = editorRef.current;
+    const m = monacoRef.current;
+    if (!editor || !m || !editorReady) return;
+
+    const chord = bindingToMonacoChord(editorKeybindings.gotoSymbol, m);
+    if (chord !== 0) {
+      editor.addCommand(chord, () => {
+        editor.getAction('editor.action.quickOutline')?.run();
+      });
+    }
+  }, [editorReady, editorKeybindings.gotoSymbol]);
 
   // Selection comment widget and cursor tracking
   useEffect(() => {

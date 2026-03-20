@@ -102,6 +102,8 @@ export function KeybindingsSettings() {
     setSourceControlKeybindings,
     searchKeybindings,
     setSearchKeybindings,
+    editorKeybindings,
+    setEditorKeybindings,
     globalKeybindings,
     setGlobalKeybindings,
     terminalOptionIsMeta,
@@ -262,6 +264,23 @@ export function KeybindingsSettings() {
                   ...searchKeybindings,
                   searchContent: binding,
                 });
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Editor */}
+      <div className="border-t pt-6">
+        <h3 className="text-lg font-medium">{t('Editor')}</h3>
+        <p className="text-sm text-muted-foreground mb-4">{t('Editor shortcuts')}</p>
+        <div className="space-y-3">
+          <div className="grid grid-cols-[140px_1fr] items-center gap-4">
+            <span className="text-sm">{t('Show Symbols')}</span>
+            <KeybindingInput
+              value={editorKeybindings.gotoSymbol}
+              onChange={(binding) => {
+                setEditorKeybindings({ ...editorKeybindings, gotoSymbol: binding });
               }}
             />
           </div>

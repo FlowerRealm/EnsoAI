@@ -15,6 +15,7 @@ import {
   defaultClaudeCodeIntegrationSettings,
   defaultCodeReviewSettings,
   defaultCommitMessageGeneratorSettings,
+  defaultEditorKeybindings,
   defaultEditorSettings,
   defaultGitCloneSettings,
   defaultGlobalKeybindings,
@@ -122,6 +123,7 @@ function getInitialState() {
     mainTabKeybindings: defaultMainTabKeybindings,
     sourceControlKeybindings: defaultSourceControlKeybindings,
     searchKeybindings: defaultSearchKeybindings,
+    editorKeybindings: defaultEditorKeybindings,
     globalKeybindings: defaultGlobalKeybindings,
     workspaceKeybindings: defaultWorkspaceKeybindings,
 
@@ -153,6 +155,9 @@ function getInitialState() {
     defaultWorktreePath: '',
     proxySettings: defaultProxySettings,
     autoCreateSessionOnActivate: false,
+
+    // Git Auto Operations
+    gitAutoFetchEnabled: true,
 
     // Git Clone Settings
     gitClone: defaultGitCloneSettings,
@@ -276,6 +281,7 @@ export const useSettingsStore = create<SettingsState>()(
       setMainTabKeybindings: (mainTabKeybindings) => set({ mainTabKeybindings }),
       setSourceControlKeybindings: (sourceControlKeybindings) => set({ sourceControlKeybindings }),
       setSearchKeybindings: (searchKeybindings) => set({ searchKeybindings }),
+      setEditorKeybindings: (editorKeybindings) => set({ editorKeybindings }),
       setGlobalKeybindings: (globalKeybindings) => set({ globalKeybindings }),
       setWorkspaceKeybindings: (workspaceKeybindings) => set({ workspaceKeybindings }),
 
@@ -514,6 +520,11 @@ export const useSettingsStore = create<SettingsState>()(
 
       setAutoCreateSessionOnActivate: (autoCreateSessionOnActivate) =>
         set({ autoCreateSessionOnActivate }),
+
+      setGitAutoFetchEnabled: (gitAutoFetchEnabled) => {
+        set({ gitAutoFetchEnabled });
+        window.electronAPI.git.setAutoFetchEnabled(gitAutoFetchEnabled);
+      },
 
       // Git Clone Setters
       setGitClone: (settings) =>
@@ -793,6 +804,11 @@ export const useSettingsStore = create<SettingsState>()(
             window.electronAPI.webInspector.start().catch((error) => {
               console.error('[WebInspector] Failed to auto-start:', error);
             });
+          }
+
+          // Sync git auto-fetch setting to main process
+          if (state.gitAutoFetchEnabled) {
+            window.electronAPI.git.setAutoFetchEnabled(true);
           }
 
           // Clean up legacy fields (async)
