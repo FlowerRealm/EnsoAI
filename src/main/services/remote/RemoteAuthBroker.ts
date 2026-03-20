@@ -409,7 +409,13 @@ export class RemoteAuthBroker {
           return;
         }
         settled = true;
-        socket.end(`${JSON.stringify(payload)}\n`);
+        try {
+          if (!socket.destroyed) {
+            socket.end(`${JSON.stringify(payload)}\n`);
+          }
+        } catch {
+          // Ignore disconnect races while finishing auth exchange.
+        }
       };
 
       socket.on('data', async (chunk: string) => {

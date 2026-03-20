@@ -199,6 +199,7 @@ const REMOTE_SHARED_SESSION_STATE_FILENAME = 'session-state.json';
 const REMOTE_SHARED_STATE_SYNC_TIMEOUT_MS = 5_000;
 const REMOTE_RPC_TIMEOUT_MS = 15_000;
 const LOCAL_COMMAND_TIMEOUT_MS = 15_000;
+const SSH_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const REMOTE_ENV_INFO_PREFIX = '__ENSO_REMOTE_ENV__';
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 8_000];
 const SCP_CONNECT_TIMEOUT_SECONDS = 30;
@@ -1937,7 +1938,14 @@ export class RemoteConnectionManager {
             pending.resolve(message.result);
           }
         } else if (message.type === 'event' && message.event) {
-          server.proc.emit(`remote:${message.event}`, message.payload);
+          try {
+            server.proc.emit(`remote:${message.event}`, message.payload);
+          } catch (emitError) {
+            console.warn(
+              `[remote:${profile.name}] Remote event listener failed for ${message.event}:`,
+              emitError
+            );
+          }
         }
       }
     });
@@ -1999,6 +2007,13 @@ export class RemoteConnectionManager {
     const timestamp = now();
     const intentional = this.intentionalDisconnects.delete(server.connectionId);
     server.closed = true;
+    try {
+      if (!server.proc.stdin.destroyed && server.proc.stdin.writable) {
+        server.proc.stdin.end();
+      }
+    } catch {
+      // Ignore shutdown races when ssh already closed its stdin.
+    }
     server.status = {
       ...server.status,
       connected: false,
@@ -3115,7 +3130,8 @@ export class RemoteConnectionManager {
   private async runSshCommand(
     profile: ConnectionProfile,
     remoteCommand: string[],
-    resolvedHost: ResolvedHostConfig
+    resolvedHost: ResolvedHostConfig,
+    timeoutMs = SSH_COMMAND_TIMEOUT_MS
   ): Promise<LocalCommandResult> {
     const { spawn } = await import('node:child_process');
     const sshContext = await this.buildSshContext(profile, resolvedHost);
@@ -3128,24 +3144,54 @@ export class RemoteConnectionManager {
       });
       let stdout = '';
       let stderr = '';
+      let settled = false;
+
+      const finish = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        callback();
+      };
+
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString();
       });
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString();
       });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        const result = { stdout, stderr, code };
-        const detail = this.formatCommandResultDetail(result);
-        if (detail && isAuthenticationFailure(detail)) {
-          this.authBroker.clearSecrets(profile.id);
-          this.resolvedHosts.delete(profile.id);
-          this.runtimes.delete(profile.id);
-          this.invalidateRuntimeVerification(profile.id);
-        }
-        resolve(result);
+      child.on('error', (error) => {
+        finish(() => reject(error));
       });
+      child.on('close', (code) => {
+        finish(() => {
+          const result = { stdout, stderr, code };
+          const detail = this.formatCommandResultDetail(result);
+          if (detail && isAuthenticationFailure(detail)) {
+            this.authBroker.clearSecrets(profile.id);
+            this.resolvedHosts.delete(profile.id);
+            this.runtimes.delete(profile.id);
+            this.invalidateRuntimeVerification(profile.id);
+          }
+          resolve(result);
+        });
+      });
+
+      const timeout = setTimeout(() => {
+        const detail = [
+          stderr.trim(),
+          stdout.trim(),
+          `target=${profile.sshTarget}`,
+          `command=${remoteCommand.join(' ')}`,
+        ]
+          .filter(Boolean)
+          .join('\n');
+        finish(() => {
+          killProcessTree(child);
+          reject(createRemoteError('SSH command timed out', undefined, detail));
+        });
+      }, timeoutMs);
     });
   }
 

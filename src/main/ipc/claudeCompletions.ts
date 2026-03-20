@@ -183,7 +183,11 @@ async function readRepositoryRemoteTextFile(
 function broadcast(snapshot: ClaudeSlashCompletionsSnapshot): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
-    win.webContents.send(IPC_CHANNELS.CLAUDE_COMPLETIONS_UPDATED, snapshot);
+    try {
+      win.webContents.send(IPC_CHANNELS.CLAUDE_COMPLETIONS_UPDATED, snapshot);
+    } catch {
+      // Window may be destroyed after the guard above.
+    }
   }
 }
 
