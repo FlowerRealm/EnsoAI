@@ -100,6 +100,7 @@ const ownerWatcherKeys = new Map<number, Set<string>>();
 const fileResourceOwners = new Set<number>();
 const remoteWatchers = new Map<string, RemoteWatcherRegistration>();
 const remoteWatcherConnectionSubscriptions = new Map<string, () => void>();
+const pendingRemoteWatcherConnectionSubscriptions = new Map<string, Promise<void>>();
 
 function resolveBatchConflictTargetPath(
   targetDir: string,
@@ -247,26 +248,49 @@ async function ensureRemoteWatcherConnectionSubscription(connectionId: string): 
     return;
   }
 
-  const offStatus = remoteConnectionManager.onDidStatusChange(connectionId, (status) => {
-    const registrations = [...remoteWatchers.values()].filter(
-      (item) => item.connectionId === connectionId
-    );
-    if (registrations.length === 0) {
-      return;
-    }
+  const pending = pendingRemoteWatcherConnectionSubscriptions.get(connectionId);
+  if (pending) {
+    await pending;
+    return;
+  }
 
-    if (status.connected) {
-      void Promise.allSettled(registrations.map((item) => startRemoteWatcherRegistration(item)));
-      return;
-    }
+  const setupPromise = Promise.resolve()
+    .then(() => {
+      if (remoteWatcherConnectionSubscriptions.has(connectionId)) {
+        return;
+      }
 
-    for (const registration of registrations) {
-      registration.removeListener?.();
-      registration.removeListener = undefined;
-    }
-  });
+      const offStatus = remoteConnectionManager.onDidStatusChange(connectionId, (status) => {
+        const registrations = [...remoteWatchers.values()].filter(
+          (item) => item.connectionId === connectionId
+        );
+        if (registrations.length === 0) {
+          return;
+        }
 
-  remoteWatcherConnectionSubscriptions.set(connectionId, offStatus);
+        if (status.connected) {
+          void Promise.allSettled(
+            registrations.map((item) => startRemoteWatcherRegistration(item))
+          );
+          return;
+        }
+
+        for (const registration of registrations) {
+          registration.removeListener?.();
+          registration.removeListener = undefined;
+        }
+      });
+
+      remoteWatcherConnectionSubscriptions.set(connectionId, offStatus);
+    })
+    .finally(() => {
+      if (pendingRemoteWatcherConnectionSubscriptions.get(connectionId) === setupPromise) {
+        pendingRemoteWatcherConnectionSubscriptions.delete(connectionId);
+      }
+    });
+
+  pendingRemoteWatcherConnectionSubscriptions.set(connectionId, setupPromise);
+  await setupPromise;
 }
 
 async function startRemoteWatcherRegistration(
@@ -344,6 +368,7 @@ async function stopRemoteWatcher(registration: RemoteWatcherRegistration): Promi
     (item) => item.connectionId === registration.connectionId
   );
   if (!hasRemainingForConnection) {
+    pendingRemoteWatcherConnectionSubscriptions.delete(registration.connectionId);
     const offStatus = remoteWatcherConnectionSubscriptions.get(registration.connectionId);
     offStatus?.();
     remoteWatcherConnectionSubscriptions.delete(registration.connectionId);
@@ -976,6 +1001,7 @@ export async function stopAllFileWatchers(): Promise<void> {
   for (const offStatus of remoteWatcherConnectionSubscriptions.values()) {
     offStatus();
   }
+  pendingRemoteWatcherConnectionSubscriptions.clear();
   remoteWatcherConnectionSubscriptions.clear();
   ownerWatcherKeys.clear();
   fileResourceOwners.clear();
@@ -1000,6 +1026,7 @@ export function stopAllFileWatchersSync(): void {
   for (const offStatus of remoteWatcherConnectionSubscriptions.values()) {
     offStatus();
   }
+  pendingRemoteWatcherConnectionSubscriptions.clear();
   remoteWatcherConnectionSubscriptions.clear();
   ownerWatcherKeys.clear();
   fileResourceOwners.clear();

@@ -221,7 +221,7 @@ async function buildLocalLinuxRuntimeBundle(arch: RemoteRuntimeArch): Promise<vo
     throw new Error(`Remote runtime bundle builder not found: ${REMOTE_RUNTIME_DEV_SCRIPT}`);
   }
 
-  const nodeExecutable = process.env.npm_node_execpath || process.env.NODE || 'node';
+  const nodeExecutable = process.env.npm_node_execpath || process.execPath;
   await runLocalCommand(nodeExecutable, [REMOTE_RUNTIME_DEV_SCRIPT, `--arch=${arch}`]);
 }
 

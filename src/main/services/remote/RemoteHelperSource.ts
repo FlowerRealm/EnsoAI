@@ -1505,7 +1505,12 @@ async function readDaemonInfo() {
 }
 
 async function writeDaemonInfo(info) {
-  await fsp.writeFile(getDaemonInfoPath(), JSON.stringify(info), 'utf8');
+  const daemonInfoPath = getDaemonInfoPath();
+  await fsp.writeFile(daemonInfoPath, JSON.stringify(info), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  await fsp.chmod(daemonInfoPath, 0o600).catch(() => {});
 }
 
 async function removeDaemonInfo() {
