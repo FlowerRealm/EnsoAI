@@ -198,7 +198,10 @@ const REMOTE_SHARED_SETTINGS_FILENAME = 'settings.json';
 const REMOTE_SHARED_SESSION_STATE_FILENAME = 'session-state.json';
 const REMOTE_SHARED_STATE_SYNC_TIMEOUT_MS = 5_000;
 const REMOTE_RPC_TIMEOUT_MS = 15_000;
+const REMOTE_ENV_INFO_PREFIX = '__ENSO_REMOTE_ENV__';
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 8_000];
+const SCP_CONNECT_TIMEOUT_SECONDS = 30;
+const SCP_UPLOAD_TIMEOUT_MS = 10 * 60_000;
 
 type RemoteServerLaunchMode = 'bridge' | 'ensure-daemon' | 'self-test' | 'stop-daemon';
 
@@ -270,6 +273,59 @@ function parseJsonLine<T>(input: string): T | null {
   }
 
   return null;
+}
+
+function parseRemoteEnvInfo(input: string): {
+  platform?: string;
+  arch?: string;
+  homeDir?: string;
+  libc?: string;
+} | null {
+  const result: {
+    platform?: string;
+    arch?: string;
+    homeDir?: string;
+    libc?: string;
+  } = {};
+  let matched = false;
+
+  for (const line of normalizeLineEndings(input).split('\n')) {
+    if (!line.startsWith(REMOTE_ENV_INFO_PREFIX)) {
+      continue;
+    }
+
+    const entry = line.slice(REMOTE_ENV_INFO_PREFIX.length);
+    const separatorIndex = entry.indexOf('=');
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = entry.slice(0, separatorIndex);
+    const value = entry.slice(separatorIndex + 1);
+
+    switch (key) {
+      case 'platform':
+        result.platform = value.trim();
+        matched = true;
+        break;
+      case 'arch':
+        result.arch = value.trim();
+        matched = true;
+        break;
+      case 'homeDir':
+        result.homeDir = value;
+        matched = true;
+        break;
+      case 'libc':
+        result.libc = value.trim();
+        matched = true;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return matched ? result : null;
 }
 
 function extractRemotePtyError(detail: string | undefined): string | undefined {
@@ -2039,6 +2095,13 @@ export class RemoteConnectionManager {
   ): Promise<T> {
     const id = server.nextRequestId++;
     const payload = JSON.stringify({ id, method, params });
+    if (payload.includes('\n') || payload.includes('\r')) {
+      throw createRemoteError(
+        'Remote request payload contains unexpected line breaks',
+        undefined,
+        `method=${method}; connectionId=${server.connectionId}`
+      );
+    }
 
     return new Promise<T>((resolve, reject) => {
       let settled = false;
@@ -2391,7 +2454,10 @@ export class RemoteConnectionManager {
       '    *glibc*|*GNU\\ libc*) libc="glibc" ;;',
       '  esac',
       'fi',
-      'printf \'{"platform":"%s","arch":"%s","homeDir":"%s","libc":"%s"}\' "$platform" "$arch" "$home" "$libc"',
+      `printf '${REMOTE_ENV_INFO_PREFIX}platform=%s\\n' "$platform"`,
+      `printf '${REMOTE_ENV_INFO_PREFIX}arch=%s\\n' "$arch"`,
+      `printf '${REMOTE_ENV_INFO_PREFIX}homeDir=%s\\n' "$home"`,
+      `printf '${REMOTE_ENV_INFO_PREFIX}libc=%s\\n' "$libc"`,
     ]);
 
     if (envInfoResult.code !== 0) {
@@ -2403,20 +2469,14 @@ export class RemoteConnectionManager {
     }
 
     const envInfoRaw = envInfoResult.stdout.trim();
-
-    const envInfo = parseJsonLine<{
-      platform?: string;
-      arch?: string;
-      homeDir?: string;
-      libc?: string;
-    }>(envInfoRaw);
+    const envInfo = parseRemoteEnvInfo(envInfoRaw);
 
     if (!envInfo) {
       throw createRemoteError(
         'Failed to parse remote platform information',
         undefined,
         [envInfoRaw, envInfoResult.stderr.trim()].filter(Boolean).join('\n') ||
-          translateRemote('Remote platform probe returned no JSON payload')
+          translateRemote('Remote platform probe returned no environment payload')
       );
     }
 
@@ -2901,7 +2961,13 @@ export class RemoteConnectionManager {
   ): Promise<void> {
     const { spawn } = await import('node:child_process');
     const sshContext = await this.buildSshContext(profile, resolvedHost);
-    const args = [...sshContext.optionArgs, localPath, `${profile.sshTarget}:${remotePath}`];
+    const args = [
+      '-o',
+      `ConnectTimeout=${SCP_CONNECT_TIMEOUT_SECONDS}`,
+      ...sshContext.optionArgs,
+      localPath,
+      `${profile.sshTarget}:${remotePath}`,
+    ];
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn('scp', args, {
@@ -2911,6 +2977,16 @@ export class RemoteConnectionManager {
       });
       let stdout = '';
       let stderr = '';
+      let settled = false;
+
+      const finish = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        callback();
+      };
 
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString();
@@ -2918,16 +2994,30 @@ export class RemoteConnectionManager {
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString();
       });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(
-          new Error(stderr.trim() || stdout.trim() || `scp exited with code ${code ?? 'unknown'}`)
-        );
+      child.on('error', (error) => {
+        finish(() => reject(error));
       });
+      child.on('close', (code) => {
+        finish(() => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
+          reject(
+            new Error(stderr.trim() || stdout.trim() || `scp exited with code ${code ?? 'unknown'}`)
+          );
+        });
+      });
+
+      const timeout = setTimeout(() => {
+        const detail = [stderr.trim(), stdout.trim(), `remotePath=${remotePath}`]
+          .filter(Boolean)
+          .join('\n');
+        finish(() => {
+          killProcessTree(child);
+          reject(createRemoteError('SCP upload timed out', undefined, detail));
+        });
+      }, SCP_UPLOAD_TIMEOUT_MS);
     });
   }
 
