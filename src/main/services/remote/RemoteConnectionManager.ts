@@ -2158,7 +2158,9 @@ export class RemoteConnectionManager {
     params: Record<string, unknown>,
     timeoutMs = REMOTE_RPC_TIMEOUT_MS
   ): Promise<T> {
-    const id = server.nextRequestId++;
+    const id = server.nextRequestId;
+    server.nextRequestId =
+      server.nextRequestId >= Number.MAX_SAFE_INTEGER ? 1 : server.nextRequestId + 1;
     const payload = JSON.stringify({ id, method, params });
     if (payload.includes('\n') || payload.includes('\r')) {
       throw createRemoteError(
