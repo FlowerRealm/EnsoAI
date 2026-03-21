@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type ConnectionProfile,
@@ -191,8 +191,6 @@ const MAX_REMOTE_DIAGNOSTIC_LINES = 40;
 const MAX_REMOTE_DIAGNOSTIC_CHARS = 8_192;
 const REMOTE_PTY_UNAVAILABLE_PREFIX = 'REMOTE_PTY_UNAVAILABLE:';
 const RUNTIME_MANIFEST_FILENAME = 'enso-remote-runtime-manifest.json';
-const REMOTE_SERVER_SOURCE = normalizeLineEndings(getRemoteServerSource());
-const REMOTE_SERVER_SOURCE_SHA256 = createHash('sha256').update(REMOTE_SERVER_SOURCE).digest('hex');
 const LINUX_ONLY_REMOTE_ERROR = 'Only glibc-based Linux x64 and arm64 remote hosts are supported';
 const REMOTE_SHARED_SETTINGS_FILENAME = 'settings.json';
 const REMOTE_SHARED_SESSION_STATE_FILENAME = 'session-state.json';
@@ -210,6 +208,9 @@ const SCP_UPLOAD_TIMEOUT_MS = 10 * 60_000;
 
 type RemoteServerLaunchMode = 'bridge' | 'ensure-daemon' | 'self-test' | 'stop-daemon';
 
+let cachedRemoteServerSource: string | null = null;
+let cachedRemoteServerSourceSha256: string | null = null;
+
 function now(): number {
   return Date.now();
 }
@@ -220,6 +221,22 @@ function normalizeLineEndings(input: string): string {
 
 function stripHashbang(input: string): string {
   return input.replace(/^#!.*\r?\n/, '');
+}
+
+function getNormalizedRemoteServerSource(): string {
+  if (cachedRemoteServerSource === null) {
+    cachedRemoteServerSource = normalizeLineEndings(getRemoteServerSource());
+  }
+  return cachedRemoteServerSource;
+}
+
+function getNormalizedRemoteServerSourceSha256(): string {
+  if (cachedRemoteServerSourceSha256 === null) {
+    cachedRemoteServerSourceSha256 = createHash('sha256')
+      .update(getNormalizedRemoteServerSource())
+      .digest('hex');
+  }
+  return cachedRemoteServerSourceSha256;
 }
 
 function sanitizeConnectionProfile(profile: StoredConnectionProfile): ConnectionProfile {
@@ -382,6 +399,16 @@ async function pathExists(targetPath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function writeJsonAtomically(targetPath: string, data: unknown): Promise<void> {
+  const tempPath = `${targetPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, JSON.stringify(data, null, 2), 'utf8');
+    await rename(tempPath, targetPath);
+  } finally {
+    await unlink(tempPath).catch(() => {});
   }
 }
 
@@ -605,6 +632,7 @@ export class RemoteConnectionManager {
   private readonly authBroker = new RemoteAuthBroker();
   private loaded = false;
   private loadingProfiles: Promise<ConnectionProfile[]> | null = null;
+  private profileFlushQueue: Promise<void> = Promise.resolve();
 
   async loadProfiles(): Promise<ConnectionProfile[]> {
     if (this.loaded) {
@@ -1438,13 +1466,14 @@ export class RemoteConnectionManager {
     runtime: ConnectionRuntime,
     serverPath: string
   ): Promise<void> {
+    const source = getNormalizedRemoteServerSource();
     const tempPath = join(
       app.getPath('temp'),
       `enso-remote-server-${profile.id}-${randomUUID()}.cjs`
     );
     try {
-      await this.validateRemoteServerSource(REMOTE_SERVER_SOURCE);
-      await writeFile(tempPath, REMOTE_SERVER_SOURCE, 'utf8');
+      await this.validateRemoteServerSource(source);
+      await writeFile(tempPath, source, 'utf8');
       await this.uploadFileOverScp(profile, tempPath, serverPath, runtime.resolvedHost);
 
       await this.execSsh(profile, [`chmod +x ${shellQuote(serverPath)}`], runtime.resolvedHost);
@@ -1464,7 +1493,7 @@ export class RemoteConnectionManager {
       platform: runtime.platform,
       arch: runtime.arch,
       linuxPtyRequired: true,
-      helperSourceSha256: REMOTE_SERVER_SOURCE_SHA256,
+      helperSourceSha256: getNormalizedRemoteServerSourceSha256(),
       runtimeArchiveName: runtimeAsset.archiveName,
     };
   }
@@ -1706,7 +1735,7 @@ export class RemoteConnectionManager {
     }
 
     const helperSourceSha256 = selfTestInfo.helperSourceSha256?.trim();
-    if (helperSourceSha256 !== REMOTE_SERVER_SOURCE_SHA256) {
+    if (helperSourceSha256 !== getNormalizedRemoteServerSourceSha256()) {
       throw createRemoteError(
         'Managed remote runtime verification failed during {{step}}',
         {
@@ -1933,6 +1962,7 @@ export class RemoteConnectionManager {
     proc.stdout.on('data', (chunk: string) => {
       server.buffer += chunk;
       if (server.buffer.length > REMOTE_SERVER_BUFFER_LIMIT_CHARS) {
+        server.buffer = '';
         const detail = createRemoteError(
           'Remote server protocol buffer exceeded limit',
           undefined,
@@ -3090,8 +3120,15 @@ export class RemoteConnectionManager {
 
   private async flush(): Promise<void> {
     const path = getRemoteSettingsPath();
-    await mkdir(app.getPath('userData'), { recursive: true });
-    await writeFile(path, JSON.stringify(this.listProfiles(), null, 2), 'utf8');
+    const profiles = this.listProfiles().map((profile) => ({ ...profile }));
+    const flushTask = this.profileFlushQueue
+      .catch(() => {})
+      .then(async () => {
+        await mkdir(app.getPath('userData'), { recursive: true });
+        await writeJsonAtomically(path, profiles);
+      });
+    this.profileFlushQueue = flushTask;
+    await flushTask;
   }
 
   private async uploadFileOverScp(
